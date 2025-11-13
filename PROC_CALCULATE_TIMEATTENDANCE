@@ -1,10 +1,4 @@
 
-GO
-/****** Object:  StoredProcedure [dbo].[PROC_CALCULATE_TIMEATTENDANCE]    Script Date: 2025-10-30 오후 4:01:51 ******/
-SET ANSI_NULLS ON
-GO
-SET QUOTED_IDENTIFIER ON
-GO
 
 ALTER PROCEDURE [dbo].[PROC_CALCULATE_TIMEATTENDANCE]
     @P_EMP_ID INT,            -- 대상 시스템 사번
@@ -62,14 +56,16 @@ BEGIN TRY
 	
 	DECLARE @CHOICE_WORK VARCHAR(2)
 	DECLARE @YESTERDAY VARCHAR(8)
-	DECLARE @MISS_START VARCHAR(8)
-	DECLARE @MISS_CLOSE VARCHAR(8)
+	DECLARE @MISS_START INT
+	DECLARE @MISS_CLOSE INT
 	DECLARE @FIX_PERF VARCHAR(8)
 	DECLARE @GET_PERF VARCHAR(8)
 	DECLARE @C_ADD_TIME INT -- 선택근무 9시 이후 출근 시간 
 	
-	DECLARE @LUNCH_STRART INT
+	DECLARE @LUNCH_START INT
 	DECLARE @LUNCH_END INT
+
+
 
     -- 프로시저 호출 시 전달된 값으로 대상 데이터 조회 및 변수 초기화
     BEGIN
@@ -78,15 +74,22 @@ BEGIN TRY
 				,@WORK_DT = WORK_DT
 				,@PERF_CD = PERF_CD
 				,@WORK_TYPE = WORK_TYPE
-				,@START_TIME = CAST(ISNULL(START_TIME,0) AS INT)
-				,@CLOSE_TIME = CAST(ISNULL(CLOSE_TIME,0) AS INT)
-				,@C_START_TIME = CASE WHEN ISNULL(GW_START_TIME,0) > 0 THEN CAST(GW_START_TIME AS INT) ELSE CAST(ISNULL(C_START_TIME,0) AS INT) END 
-				,@C_CLOSE_TIME = CASE WHEN ISNULL(GW_CLOSE_TIME,0) > 0 THEN CAST(GW_CLOSE_TIME AS INT) ELSE  CAST(CASE WHEN C_CLOSE_TIME = 0 THEN 1 ELSE ISNULL(C_CLOSE_TIME,0) END AS INT) END
-				,@GW_START_TIME = CAST(ISNULL(GW_START_TIME,0) AS INT)
-				,@GW_CLOSE_TIME = CAST(ISNULL(GW_CLOSE_TIME,0) AS INT)
-				,@GW_R_START_TIME = CAST(ISNULL(GW_R_START_TIME,0) AS INT)
-				,@GW_R_CLOSE_TIME = CAST(ISNULL(GW_R_CLOSE_TIME,0) AS INT)
-				,@NORMAL_TIME = CAST(8 AS FLOAT)
+				,@START_TIME = CAST(START_TIME AS INT)
+				,@CLOSE_TIME = CAST(CLOSE_TIME AS INT)
+				,@C_START_TIME = CASE 
+									WHEN GW_START_TIME IS NOT NULL AND GW_START_TIME > 0 
+										THEN CAST(GW_START_TIME AS INT) 
+									ELSE CAST(C_START_TIME AS INT) 
+								 END
+				,@C_CLOSE_TIME = CASE 
+									WHEN GW_CLOSE_TIME IS NOT NULL AND GW_CLOSE_TIME > 0 
+										THEN CAST(GW_CLOSE_TIME AS INT) 
+									ELSE CAST(C_CLOSE_TIME AS INT) 
+								 END
+				,@GW_START_TIME    = CAST(GW_START_TIME    AS INT)
+				,@GW_CLOSE_TIME    = CAST(GW_CLOSE_TIME    AS INT)
+				,@GW_R_START_TIME  = CAST(GW_R_START_TIME  AS INT)
+				,@GW_R_CLOSE_TIME  = CAST(GW_R_CLOSE_TIME  AS INT)
 				,@LATE_TIME = 0
 				,@EARLY_TIME = 0
 				,@NORMAL_TIME = 0
@@ -112,6 +115,22 @@ BEGIN TRY
 				,@UP_OPID = UP_OPID
     FROM dbo.HR_TIMEATTENDANCE WITH (NOLOCK)
     WHERE EMP_ID = @P_EMP_ID AND WORK_DT = @P_WORK_DT;
+
+	------------------------------------------------------------------
+	-- [정규화] 0을 결측(NULL)로 간주: 과거 데이터/전처리에서 0이 들어온 경우 방지
+	------------------------------------------------------------------
+	SET @START_TIME     = NULLIF(@START_TIME,     0);
+	SET @CLOSE_TIME     = NULLIF(@CLOSE_TIME,     0);
+	SET @C_START_TIME   = NULLIF(@C_START_TIME,   0);
+	SET @C_CLOSE_TIME   = NULLIF(@C_CLOSE_TIME,   0);
+	SET @GW_START_TIME  = NULLIF(@GW_START_TIME,  0);
+	SET @GW_CLOSE_TIME  = NULLIF(@GW_CLOSE_TIME,  0);
+	SET @GW_R_START_TIME= NULLIF(@GW_R_START_TIME,0);
+	SET @GW_R_CLOSE_TIME= NULLIF(@GW_R_CLOSE_TIME,0);
+
+	-- 시작/종료 중 하나라도 없으면 이후 기본근무 계산 블록들이 실행되지 않도록 함
+	-- (아래 BASIC_CALC/CHOICE_CALC 내 조건은 IS NULL 체크로 충분)
+
 
     -- 대상 데이터가 없는 경우 프로시저 종료
     IF @DKID IS NULL
@@ -144,7 +163,11 @@ BEGIN TRY
 			*/
 
 	
-		
+		DECLARE @SHIFT_MIN INT = CASE @PERF_CD
+                    WHEN 'G52' THEN  60 WHEN 'G53' THEN 120 WHEN 'G54' THEN 180
+                    WHEN 'G55' THEN 240 WHEN 'G56' THEN 300 WHEN 'G57' THEN 360
+                    WHEN 'G58' THEN 420 ELSE 0 END;
+
 		SET @CHOICE_WORK = 'Y' --CASE WHEN ISNULL(@C_START_TIME,0) != 0 OR ISNULL(@C_CLOSE_TIME,0) != 0 THEN 'Y' ELSE 'N' END
 		--SET @CHOICE_WORK = CASE WHEN ISNULL(@START_TIME,0) != 0 AND ISNULL(@CLOSE_TIME,0) != 0 THEN 'N' ELSE 'Y' END
 
@@ -323,47 +346,35 @@ BEGIN TRY
 									-- 시차휴가 추가 keonhuilee
 									ELSE IF (@PERF_CD IN ('G52', 'G53', 'G54', 'G55', 'G56', 'G57', 'G58'))
 										BEGIN
-											-- --print '시차휴가'
-											IF (@PERF_CD = 'G52')
-												BEGIN
-													SELECT @NORMAL_TIME = 480 - @LATE_TIME - @EARLY_TIME - 60
-												END
-											ELSE IF (@PERF_CD = 'G53')
-												BEGIN
-													SELECT @NORMAL_TIME = 480 - @LATE_TIME - @EARLY_TIME - 120
-												END
-											ELSE IF (@PERF_CD = 'G54')
-												BEGIN
-													SELECT @NORMAL_TIME = 480 - @LATE_TIME - @EARLY_TIME - 180
-												END
-											ELSE IF (@PERF_CD = 'G55')
-												BEGIN
-													SELECT @NORMAL_TIME = 480 - @LATE_TIME - @EARLY_TIME - 240
-												END
-											ELSE IF (@PERF_CD = 'G56')
-												BEGIN
-													SELECT @NORMAL_TIME = 480 - @LATE_TIME - @EARLY_TIME - 300
-												END
-											ELSE IF (@PERF_CD = 'G57')
-												BEGIN
-													SELECT @NORMAL_TIME = 480 - @LATE_TIME - @EARLY_TIME - 360
-												END
-											ELSE
-												BEGIN
-													SELECT @NORMAL_TIME = 480 - @LATE_TIME - @EARLY_TIME - 420
-												END
-											-- --print '시차휴가_(' + CAST(@NORMAL_TIME AS VARCHAR) + ')'
+											-- 기존: 480 - 지각 - 조퇴 - (시차분)  
+											-- 변경: (근무가능 480 - 지각 - 조퇴) + 시차분, 8시간 상한 
+											SET @NORMAL_TIME = 
+												CASE 
+												  WHEN @WORK_TYPE = 'W'
+													THEN 
+													  CASE 
+														WHEN (480 - ISNULL(@LATE_TIME,0) - ISNULL(@EARLY_TIME,0)) < 0 
+															THEN 0
+														ELSE 
+															CASE 
+															  WHEN (480 - ISNULL(@LATE_TIME,0) - ISNULL(@EARLY_TIME,0) + @SHIFT_MIN) > 480 
+																   THEN 480
+															  ELSE (480 - ISNULL(@LATE_TIME,0) - ISNULL(@EARLY_TIME,0) + @SHIFT_MIN)
+															END
+													  END
+												  ELSE @NORMAL_TIME
+												END;
 										END
 									ELSE
 										BEGIN
 											-- --print '평일2'
-											IF (@CLOSE_TIME - @START_TIME = 0)
+											IF (@CLOSE_TIME IS NULL OR @START_TIME IS NULL)
 												BEGIN
 													SELECT @NORMAL_TIME = 0
 												END
-											ELSE IF (@START_TIME IS NULL) AND (@CLOSE_TIME IS NULL)		
-												BEGIN
-													SELECT @NORMAL_TIME = 0
+                                             ELSE IF (@CLOSE_TIME - @START_TIME = 0)
+                                                 BEGIN
+                                                     SELECT @NORMAL_TIME = 0
 												END
 											ELSE
 												BEGIN
@@ -450,37 +461,83 @@ BEGIN TRY
 			CHOICE_CALC:
 				print 'CHOICE_CALC'
 				-- 선택근무제 로직
-				BEGIN
-						SET @LUNCH_STRART = 720;
-						SET @LUNCH_END = 780;
+				
 
-						--점심시간 내 출퇴근일 경우 시간 조정
-						IF @LUNCH_STRART <= @C_CLOSE_TIME AND @C_CLOSE_TIME < @LUNCH_END
-							BEGIN
-								SET @C_CLOSE_TIME = @LUNCH_STRART;
-							END
-						
-						--점심시간 내 출퇴근일 경우 시간 조정
-						IF @LUNCH_STRART < @C_START_TIME AND @C_START_TIME <= @LUNCH_END
-							BEGIN
-								SET @C_START_TIME = @LUNCH_END + (@C_START_TIME - @LUNCH_STRART);
-							END
+
+				BEGIN
+						SET @LUNCH_START = 720;
+						SET @LUNCH_END = 780;
+						/* [FIX] 원시/코어 분리: 지각·조퇴·시차판정은 원시값, 코어/휴게/연장 계산은 CORE값 */
+						DECLARE @RAW_C_START_TIME  INT = @C_START_TIME;
+						DECLARE @RAW_C_CLOSE_TIME  INT = @C_CLOSE_TIME;
+						DECLARE @CORE_C_START_TIME INT = @C_START_TIME;
+						DECLARE @CORE_C_CLOSE_TIME INT = @C_CLOSE_TIME;
+
 						
 						----print '== 선택근무제 시간 계산 시작(평일, 휴일제외) =='
 						----print '@C_START_TIME(@GW_START_TIME) : ' + CAST(@C_START_TIME AS VARCHAR) + '(' + RTRIM(CAST(@GW_START_TIME AS VARCHAR)) + ')'
 						----print '@C_CLOSE_TIME(@GW_CLOSE_TIME) : ' + CAST(@C_CLOSE_TIME AS VARCHAR) + '(' + RTRIM(CAST(@GW_CLOSE_TIME AS VARCHAR)) + ')'
 						IF @WORK_TYPE = 'W'
 							BEGIN
+
+								---------------------------------------------------------
+								-- [NEW SIMPLE RULE]
+								-- 출근 또는 퇴근 중 하나라도 없고, 시차시간이 있으면
+								-- 시차구간(GW_R_START_TIME~GW_R_CLOSE_TIME)만 근무시간으로 인정
+								---------------------------------------------------------
+								IF (
+									 (@C_START_TIME IS NULL OR @C_START_TIME = 0
+									  OR @C_CLOSE_TIME IS NULL OR @C_CLOSE_TIME = 0)
+									 AND (@GW_R_START_TIME IS NOT NULL AND @GW_R_START_TIME > 0)
+									 AND (@GW_R_CLOSE_TIME IS NOT NULL AND @GW_R_CLOSE_TIME > 0)
+								 )
+								BEGIN
+									DECLARE @R_DUR INT = @GW_R_CLOSE_TIME - @GW_R_START_TIME;
+									DECLARE @REPVAC_MIN_SIMPLE INT = ISNULL(@C_REPVAC_TIME,0) * 60; -- 대체휴가(시간) → 분
+
+									IF (@R_DUR < 0) SET @R_DUR = 0;
+	                                -- 시차 + 대체휴가 합산 후 상한(540)
+	                                SET @R_DUR = @R_DUR + @REPVAC_MIN_SIMPLE;
+	                                IF (@R_DUR > 540) SET @R_DUR = 540;
+
+									SET @C_NORMAL_TIME = @R_DUR;
+									SET @C_LATE_TIME = 0;
+									SET @C_EARLY_TIME = 0;
+									SET @C_BREAK_TIME = 0;
+									SET @C_NIGHT_TIME = 0;
+									SET @C_MIDNIGHT_TIME = 0;
+									SET @C_ALLNIGHT_TIME = 0;
+
+									PRINT CONCAT('[SIMPLE RULE] 시차만 근무 인정: ',
+										'R_DUR(+REPVAC)=',@R_DUR,
+										', C_NORMAL_TIME=',@C_NORMAL_TIME);
+
+									UPDATE HR_TIMEATTENDANCE
+										SET  C_NORMAL_TIME   = @C_NORMAL_TIME
+										   ,C_LATE_TIME      = 0
+										   ,C_EARLY_TIME     = 0
+										   ,C_BREAK_TIME     = 0
+										   ,C_NIGHT_TIME     = 0
+										   ,C_MIDNIGHT_TIME  = 0
+										   ,C_ALLNIGHT_TIME  = 0
+										   ,UP_DATETIME      = GETDATE()
+										   ,UP_OPID          = 'SYSTEM'
+									WHERE DKID = @DKID AND WORK_DT = @WORK_DT;
+
+									GOTO COMPLATE_PROCESS;
+								END
+
+
 								-- 근무일 
 								-- 자율(오전) 09 ~ 10 사이에 출근
-								IF @C_START_TIME != 0 AND @C_CLOSE_TIME != 0
+								IF @RAW_C_START_TIME IS NOT NULL AND @RAW_C_CLOSE_TIME IS NOT NULL
 									BEGIN
-										IF  @C_START_TIME < 540 -- 540(9시 이전 출근)
+										IF  @RAW_C_START_TIME < 540 -- 540(9시 이전 출근)
 											SELECT @C_AM = 60
-										ELSE IF @C_START_TIME <= 600 -- 600(10시 이전 출근)
-											SELECT @C_AM = 600 - @C_START_TIME
+										ELSE IF @RAW_C_START_TIME <= 600 -- 600(10시 이전 출근)
+											SELECT @C_AM = 600 - @RAW_C_START_TIME
 					       				
-										IF @C_START_TIME >= 600
+										IF @RAW_C_START_TIME  >= 600
 											SET @C_ADD_TIME = 0
 										ELSE
 											SET @C_ADD_TIME = 60 - @C_AM
@@ -494,23 +551,22 @@ BEGIN TRY
 
 								-- 자율(오후) 17 ~ 18 사이에 퇴근
 			-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-								IF @C_START_TIME != 0 AND @C_CLOSE_TIME != 0
+								IF @RAW_C_START_TIME IS NOT NULL AND @RAW_C_CLOSE_TIME IS NOT NULL
 									BEGIN
-										IF @C_CLOSE_TIME <= 540			
+										IF @RAW_C_CLOSE_TIME <= 540			
 												SELECT @C_PM = 60
-										ELSE IF @C_CLOSE_TIME > (1080 + @C_ADD_TIME) --420(아침 7시 이전) / 1080(오후 18시 이후)
-										--IF (@C_CLOSE_TIME < 420 OR @C_CLOSE_TIME > 1080) --420(아침 7시 이전) / 1080(오후 18시 이후)
+										ELSE IF @RAW_C_CLOSE_TIME > (1080 + @C_ADD_TIME) --420(아침 7시 이전) / 1080(오후 18시 이후)
 										-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
 											SELECT @C_PM = 60 + @C_ADD_TIME
-										ELSE IF @C_CLOSE_TIME > (1020 + @C_ADD_TIME) -- 1020(오후 17시 이후)
-											SELECT @C_PM = @C_CLOSE_TIME - 1020 
+										ELSE IF @RAW_C_CLOSE_TIME > (1020 + @C_ADD_TIME) -- 1020(오후 17시 이후)
+											SELECT @C_PM = @RAW_C_CLOSE_TIME - 1020 
 									END
 								ELSE 
 									BEGIN
 										SET @C_PM = 0
 									END
 
-								-- 정상(코어) 10 ~ 17 사이에 근무
+								-- 정상(코어) 10 ~ 17 사이에 근무 (RAW 시간 기준)
 								IF (@C_AM > 0 AND @C_PM > 0)
 									BEGIN
 										SELECT @C_CORE = 420										
@@ -518,18 +574,22 @@ BEGIN TRY
 									END
 								ELSE IF (@C_AM = 0 AND @C_PM = 0) 
 									BEGIN
-										SELECT @C_CORE = @C_CLOSE_TIME - @C_START_TIME
+										-- 출근 또는 퇴근 시간이 0이면 근무 시간은 0으로 처리
+										IF (@RAW_C_START_TIME IS NULL OR @RAW_C_CLOSE_TIME IS NULL OR @RAW_C_START_TIME = 0 OR @RAW_C_CLOSE_TIME = 0)
+											SELECT @C_CORE = 0
+										ELSE
+											SELECT @C_CORE = @C_CLOSE_TIME - @C_START_TIME
 										--print '정상(코어) 10 ~ 17 사이에 근무 222'
 									END
 								ELSE IF @C_AM > 0	
 									BEGIN
 										--print '정상(코어) 10 ~ 17 사이에 근무 333'
-										SELECT @C_CORE = @C_CLOSE_TIME - 600 
+										SELECT @C_CORE = @RAW_C_CLOSE_TIME - 600 
 									END
 								ELSE
 									BEGIN
 										--print CONCAT('@C_ADD_TIME :',@C_ADD_TIME,', @C_START_TIME' , (1020 + @C_ADD_TIME) - @C_START_TIME)
-										SELECT @C_CORE	= (1020 + @C_ADD_TIME) - @C_START_TIME	
+										SELECT @C_CORE  = (1020 + @C_ADD_TIME) - @RAW_C_START_TIME
 									END
 								-- 2019.11.25 C_NORMALTIME 미적용 수정(선택근무)
 								IF @C_CORE IS NULL 
@@ -595,7 +655,7 @@ BEGIN TRY
 															END
 													END
 										ELSE
-											--IF ((@GW_R_START_TIME >= @C_START_TIME) OR (@GW_R_START_TIME >= @START_TIME))
+
 											IF ((@GW_R_START_TIME >= @C_START_TIME AND @C_START_TIME != 0) OR (@GW_R_START_TIME >= @START_TIME AND @START_TIME != 0))
 												BEGIN
 													SELECT @C_HALF_TIME = 0
@@ -635,8 +695,44 @@ BEGIN TRY
 								--print '시차 휴가 @C_HALF_TIME : ' + CAST(@C_HALF_TIME AS CHAR)
 
 								print CONCAT('@C_AM: ',@C_AM,'_@C_ADD_TIME: ' , @C_ADD_TIME,'_@C_CORE: ', @C_CORE,'_@C_PM: ', @C_PM,'_@C_HALF_TIME: ' , @C_HALF_TIME,'_@C_HALF_HALF_TIME: ' , @C_HALF_HALF_TIME)
+								
 								--SELECT @C_NORMAL_TIME = @C_AM + @C_CORE + @C_PM ( 기존 로직 주석 처리 : 2019.06.21 )
-								SELECT @C_NORMAL_TIME = (@C_AM ) + @C_CORE + @C_PM + @C_HALF_TIME + @C_HALF_HALF_TIME
+								--SELECT @C_NORMAL_TIME = (@C_AM ) + @C_CORE + @C_PM + @C_HALF_TIME + @C_HALF_HALF_TIME
+
+								--=========================================================
+								-- [FIX v2] 시차(G52~G58)는 근무시간으로 "반영"
+								--  - 일반/비시차: 상한 480분 (기존 유지)
+								--  - 시차(G52~G58): 상한 540분까지 인정
+								--=========================================================
+								DECLARE @BASE_WORK   INT = ISNULL(@C_AM,0) + ISNULL(@C_CORE,0) + ISNULL(@C_PM,0);
+								DECLARE @TOPUP       INT = ISNULL(@C_HALF_TIME,0) + ISNULL(@C_HALF_HALF_TIME,0);
+								DECLARE @REPVAC_MIN  INT = ISNULL(@C_REPVAC_TIME,0) * 60;  -- 대체휴가(시간) → 분
+								
+								IF @PERF_CD IN ('G52','G53','G54','G55','G56','G57','G58')
+								BEGIN
+                                    -- 시차는 근무시간에 반영: (기준근무 + 시차보전 + 대체휴가) ≤ 540
+									IF (@BASE_WORK + @TOPUP + @REPVAC_MIN) > 540
+                                        SET @C_NORMAL_TIME = 540;
+                                    ELSE
+                                        SET @C_NORMAL_TIME = @BASE_WORK + @TOPUP + @REPVAC_MIN;
+
+								END
+								ELSE
+								BEGIN
+                                   -- 비시차: (기준근무 + 시차/반반차 보전 + 대체휴가) ≤ 480
+                                   IF (@BASE_WORK + @TOPUP + @REPVAC_MIN) > 480
+                                       SET @C_NORMAL_TIME = 480;
+                                   ELSE
+                                       SET @C_NORMAL_TIME = @BASE_WORK + @TOPUP + @REPVAC_MIN;
+								END
+
+								PRINT CONCAT(
+                                    'BASE=',@BASE_WORK,
+                                    ' TOPUP=',@TOPUP,
+                                    ' REPVAC_MIN=',@REPVAC_MIN,
+									' PERF=',@PERF_CD,
+									' => C_NORMAL_TIME=',@C_NORMAL_TIME
+								);
 
 								-- 지각
 								IF @C_START_TIME - 600 >= 0
@@ -645,30 +741,73 @@ BEGIN TRY
 									END
 								--print '@C_LATE_TIME : ' + CAST(@C_LATE_TIME AS CHAR)
 
-								-- 조퇴
-								IF (600 < @C_CLOSE_TIME AND 1020 >= @C_CLOSE_TIME)
+
+								--=========================================================
+								-- [FIX] 조퇴 계산 보정: 시차휴가(G52~G58) 승인 구간을 조퇴에서 차감
+								--   EARLY_RAW = 17:00까지의 부족분
+								--   overlap   = [C_CLOSE, 17:00) ∩ [GW_R_START, GW_R_CLOSE) (분)
+								--   C_EARLY_TIME = MAX(0, EARLY_RAW - overlap)
+								--=========================================================
+								DECLARE @EARLY_RAW INT = 0;
+								-- 점심 중 퇴근 보정: 조퇴 계산에서는 점심을 조퇴에 포함하지 않기 위해 13:00으로 스냅
+								DECLARE @CLOSE_FOR_EARLY INT;
+								SET @CLOSE_FOR_EARLY =
+									CASE
+										WHEN (@RAW_C_CLOSE_TIME >= 720 AND @RAW_C_CLOSE_TIME < 780) THEN 780  -- 12:00~13:00 사이 퇴근 → 13:00으로 보정
+										ELSE ISNULL(@RAW_C_CLOSE_TIME, @C_CLOSE_TIME)
+									END;
+
+								-- 조퇴 원시값(17:00 기준)
+								SET @EARLY_RAW = 0;
+								IF (600 < @CLOSE_FOR_EARLY AND 1020 >= @CLOSE_FOR_EARLY)
+								BEGIN
+									SET @EARLY_RAW = 1020 - @CLOSE_FOR_EARLY;
+								END
+
+								IF @PERF_CD IN ('G52','G53','G54','G55','G56','G57','G58')
+								BEGIN
+									DECLARE @R_START INT = ISNULL(@GW_R_START_TIME, 0);
+									DECLARE @R_END   INT = ISNULL(@GW_R_CLOSE_TIME, 0);
+									DECLARE @overlap INT = 0;
+
+									IF (@R_START > 0 AND @R_END > 0)
 									BEGIN
-										SELECT @C_EARLY_TIME= 1020 - @C_CLOSE_TIME
+										-- 교집합: [max(CLOSE_FOR_EARLY, R_START), min(1020, R_END))
+										DECLARE @left  INT = CASE WHEN @GW_R_START_TIME > @CLOSE_FOR_EARLY THEN @GW_R_START_TIME ELSE @CLOSE_FOR_EARLY END;
+										DECLARE @right INT = CASE WHEN @R_END   < 1020          THEN @R_END   ELSE 1020           END;
+										IF (@right > @left)
+											SET @overlap = @right - @left;
 									END
+
+									SET @C_EARLY_TIME = CASE WHEN (@EARLY_RAW - @overlap) > 0 THEN (@EARLY_RAW - @overlap) ELSE 0 END;
+								END
+								ELSE
+								BEGIN
+									SET @C_EARLY_TIME = @EARLY_RAW;
+								END
+								PRINT CONCAT('EARLY_RAW:',@EARLY_RAW, ' overlap:', ISNULL(@overlap,0), ' -> C_EARLY_TIME:', @C_EARLY_TIME);
 								--print '@C_EARLY_TIME : ' + CAST(@C_EARLY_TIME AS CHAR)
 
 								-- 18 ~ 21시 근무 // check
 			-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-								--IF (@C_CLOSE_TIME <= 540 OR (1260 + @C_ADD_TIME) <= @C_CLOSE_TIME)
-								IF @PERF_CD = 'G01' AND (@C_CLOSE_TIME <= 540 OR (1260 + @C_ADD_TIME) <= @C_CLOSE_TIME)
-			/*
-								IF (@C_CLOSE_TIME <= 420 OR 1260 <= @C_CLOSE_TIME)
-			*/
-			-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-									BEGIN
-										SELECT @C_NIGHT_TIME = 180
-									END
-								ELSE IF @C_CLOSE_TIME > (1080 + @C_ADD_TIME)
-									BEGIN
-										SELECT @C_NIGHT_TIME = @C_CLOSE_TIME - (1080 + @C_ADD_TIME)
-									END
-								--print '@C_NIGHT_TIME : ' + CAST(@C_NIGHT_TIME AS CHAR)
 
+								IF @C_NORMAL_TIME > 0
+									BEGIN
+										IF @PERF_CD = 'G01' AND (@C_CLOSE_TIME <= 540 OR (1260 + @C_ADD_TIME) <= @C_CLOSE_TIME)
+
+					-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
+											BEGIN
+												SELECT @C_NIGHT_TIME = 180
+											END
+										ELSE IF @C_CLOSE_TIME > (1080 + @C_ADD_TIME)
+											BEGIN
+												IF @C_CLOSE_TIME > (1260 + @C_ADD_TIME) -- 21:00 이후 퇴근 시
+													SELECT @C_NIGHT_TIME = 180 -- 최대 180분 (18:00~21:00)
+												ELSE -- 18:00 ~ 21:00 사이 퇴근 시
+													SELECT @C_NIGHT_TIME = @C_CLOSE_TIME - (1080 + @C_ADD_TIME)
+											END
+									--print '@C_NIGHT_TIME : ' + CAST(@C_NIGHT_TIME AS CHAR)
+									END
 								-- 21 ~ 24시 근무 // check
 								IF @GW_CLOSE_TIME IS NOT NULL AND ISNULL(@GW_CLOSE_TIME,0) > 0
 									BEGIN
@@ -678,7 +817,6 @@ BEGIN TRY
 			-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
 												IF @C_CLOSE_TIME <= 540
 													BEGIN			
-												--IF @C_CLOSE_TIME <= 420 -- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee	
 														--print ' 02 ~ 07시 근무: 그룹웨어 자료 존재('+ CAST(@GW_CLOSE_TIME AS CHAR) + ')'
 														SET @C_ALLNIGHT_TIME = (CASE WHEN @GW_CLOSE_TIME > 240 AND @GW_CLOSE_TIME <= 300 THEN @GW_CLOSE_TIME - 300 ELSE @GW_CLOSE_TIME END) 
 														SET @C_MIDNIGHT_TIME = 180														
@@ -704,50 +842,25 @@ BEGIN TRY
 								--print 'final @C_MIDNIGHT_TIME : ' + CAST(@C_MIDNIGHT_TIME AS CHAR)
 						
 
-								/*
-								-- 02 ~ 07시 근무 // check
-								IF @GW_CLOSE_TIME IS NOT NULL AND @GW_CLOSE_TIME > 0 
-									BEGIN
-									--	IF @PERF_CD NOT IN ('G52','G53','G54','G55','G56','G57','G58')
-									--		BEGIN
-			-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-												--print '02 ~ 09시 근무 : 그룹웨어 자료 존재('+ CAST(@GW_CLOSE_TIME AS CHAR) + ')'
-												IF @C_CLOSE_TIME <= 540
-													SELECT @C_ALLNIGHT_TIME = CASE WHEN @C_CLOSE_TIME - @C_ADD_TIME < 0 THEN 0 ELSE @C_CLOSE_TIME - @C_ADD_TIME END 
-													SELECT @C_MIDNIGHT_TIME = 180
-			/*
-												--print '02 ~ 07시 근무 : 그룹웨어 자료 존재('+ CAST(@GW_CLOSE_TIME AS CHAR) + ')'
-												IF @C_CLOSE_TIME <= 420
-													SELECT @C_ALLNIGHT_TIME = @C_CLOSE_TIME
-			*/
 			-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
 									--		END
-									END*/
+
 								--print '@C_ALLNIGHT_TIME : ' + CAST(@C_ALLNIGHT_TIME AS CHAR)
 											
-								-- 휴게시간 // 12~13시
-			-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-								IF (@C_START_TIME <= (720 - @C_ADD_TIME) AND @C_CLOSE_TIME <= 540 ) OR (@C_START_TIME <= (720 - @C_ADD_TIME) AND (780 - @C_ADD_TIME) <= @C_CLOSE_TIME )						 
-			/*
-								IF (@C_START_TIME <= 720 AND @C_CLOSE_TIME <= 420 ) OR (@C_START_TIME <= 720 AND 780 <= @C_CLOSE_TIME )						 
-			*/
-			-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-									BEGIN
-										--PRINT '기본'
-										IF @C_START_TIME > 0 AND @C_CLOSE_TIME > 0
-											BEGIN
-												SELECT @C_BREAK_TIME_12 = 60
-											END
-										ELSE
-											BEGIN
-												SELECT @C_BREAK_TIME_12 = 0
-											END
-									END
-								ELSE IF ((720 - @C_ADD_TIME) < @C_START_TIME AND @C_START_TIME <= (780 - @C_ADD_TIME) ) 
-									BEGIN
-										--PRINT CONCAT('계산 : ',(780 - @C_ADD_TIME) - @C_START_TIME)
-										SELECT @C_BREAK_TIME_12 = (780 - @C_ADD_TIME) - @C_START_TIME
-									END
+								-- 점심 휴게시간(12~13)은 RAW 출퇴근과의 교집합으로 정확히 산정
+								DECLARE @LUNCH_OVERLAP INT =
+									CASE
+									  WHEN @RAW_C_START_TIME IS NULL OR @RAW_C_CLOSE_TIME IS NULL THEN 0
+									  ELSE
+										CASE
+										  WHEN (CASE WHEN @RAW_C_CLOSE_TIME < 780 THEN @RAW_C_CLOSE_TIME ELSE 780 END) >
+											   (CASE WHEN @RAW_C_START_TIME > 720 THEN @RAW_C_START_TIME ELSE 720 END)
+										  THEN (CASE WHEN @RAW_C_CLOSE_TIME < 780 THEN @RAW_C_CLOSE_TIME ELSE 780 END)
+											   - (CASE WHEN @RAW_C_START_TIME > 720 THEN @RAW_C_START_TIME ELSE 720 END)
+										  ELSE 0
+										END
+									END;
+								SET @C_BREAK_TIME_12 = @LUNCH_OVERLAP; -- 0~60분 범위
 
 								--print '@C_BREAK_TIME_12 : ' + CAST(@C_BREAK_TIME_12 AS CHAR)
 
@@ -775,19 +888,7 @@ BEGIN TRY
 			-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
 								-- 18 ~ 21시 근무(2018.08.21 / 김문성 사원 요청)
 								--print '@18시 휴게시간을 위한 정상근무시간 계산 : ' + CAST(@C_ET_TIME - @C_ST_TIME AS CHAR)
-			/*
-								IF @C_ST_TIME >= 720
-									BEGIN
-										--print '12시 이후 출근('+  RTRIM(CAST(@C_ET_TIME - (@C_ST_TIME + 480) AS CHAR)) + ')'
-										IF (@C_ET_TIME - @C_ST_TIME) >= 480
-											BEGIN
-												IF @C_ET_TIME - (@C_ST_TIME + 480) < 60
-													SELECT @C_BREAK_TIME_18 = @C_ET_TIME - (@C_ST_TIME + 480)
-												ELSE
-													SELECT @C_BREAK_TIME_18 = 60
-											END
-									END
-			*/
+
 								IF @C_ST_TIME >= (600 - @C_ADD_TIME)
 									BEGIN
 										--print '10시 이후 출근('+  RTRIM(CAST(@C_ET_TIME - (@C_ST_TIME + 540) AS CHAR)) + ')'
@@ -812,47 +913,12 @@ BEGIN TRY
 											BEGIN
 												SELECT @C_BREAK_TIME_18 = 0
 											END
-			/*
-										--print '12시 이전 출근('+  RTRIM(CAST(@C_ET_TIME - (@C_ST_TIME + 540) AS CHAR)) + ')'
-										IF (@C_ET_TIME - @C_ST_TIME) >= 540
-											BEGIN
-												IF @C_ET_TIME - (@C_ST_TIME + 540) < 60
-													SELECT @C_BREAK_TIME_18 = @C_ET_TIME - (@C_ST_TIME + 540)
-												ELSE
-													SELECT @C_BREAK_TIME_18 = 60 
-											END
-			*/
+
 			-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
 									END
 								--print '@C_BREAK_TIME_18_NEW : ' + CAST(@C_BREAK_TIME_18 AS CHAR)
 
-								/* 1차 작업....
-								IF (@C_ET_TIME - @C_ST_TIME) >= 480 
-									--print '@BREAK_TIME_18_1 : ' + CAST(@C_CLOSE_TIME - @C_START_TIME AS CHAR)
-									--print '@BREAK_TIME_18_2 : ' + CAST(@C_CLOSE_TIME - (@C_START_TIME + 480) AS CHAR)
-									IF @C_CLOSE_TIME - (@C_START_TIME + 480) < 60
-										SELECT @C_BREAK_TIME_18 = @C_CLOSE_TIME - (@C_START_TIME + 480)
-									ELSE IF @C_CLOSE_TIME - (@C_START_TIME + 480) > 60
-										SELECT @C_BREAK_TIME_18 = 60
-								*/
-
-								/* 주석처리 : 2018.08.21 ( 김문성 사원 요청으로 처리 )
-								-- 18 ~ 21시 근무 중 20시 이후근무했을 경우만 휴게시간 집계(19:59 이전은 휴게시간 없음, 20:00 이후만 휴게시간 1시간 집계)
-								IF @C_NIGHT_TIME >= 120
-									SELECT @C_BREAK_TIME_18 = 60
-								ELSE
-									SELECT @C_BREAK_TIME_18 = 0
-								--print '@C_BREAK_TIME_18_OLD : ' + CAST(@C_BREAK_TIME_18 AS CHAR)
-								*/
-
-								/* 주석처리 : 2018.07.12 ( 김문성 사원 요청으로 처리 )
-								-- 휴게시간 // 18~19
-								IF @C_NIGHT_TIME > 60						 
-										SELECT @C_BREAK_TIME_18 = 60
-								ELSE IF @C_NIGHT_TIME > 0
-									SELECT @C_BREAK_TIME_18 = @C_NIGHT_TIME
-								--print '@C_BREAK_TIME_18 : ' + CAST(@C_BREAK_TIME_18 AS CHAR)
-								*/
+							
 
 			-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
 								-- 휴게 시간 변경
@@ -877,25 +943,12 @@ BEGIN TRY
 												SELECT @C_BREAK_TIME_01 = 60
 										END
 								--print '@C_BREAK_TIME_01 : ' + CAST(@C_BREAK_TIME_01 AS CHAR)
-			/*
-								-- 휴게시간 // 01~02
-								IF @C_ALLNIGHT_TIME >= 120						 
-									 SELECT @C_BREAK_TIME_01 = 60
-								ELSE IF @C_ALLNIGHT_TIME > 60
-									 SELECT @C_BREAK_TIME_01 = @C_ALLNIGHT_TIME - 60
-								ELSE 
-									SELECT @C_BREAK_TIME_01 = 0
-								--print '@C_BREAK_TIME_01 : ' + CAST(@C_BREAK_TIME_01 AS CHAR)
 
-								-- 휴게시간 // 06~07
-								IF (@C_CLOSE_TIME > 360 AND @C_CLOSE_TIME <= 420)
-									 SELECT @C_BREAK_TIME_06 = @C_CLOSE_TIME - 360
-								--print '@C_BREAK_TIME_06 : ' + CAST(@C_BREAK_TIME_06 AS CHAR)
-			*/
 			-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
 								PRINT CONCAT('@C_BREAK_TIME_12 : ', @C_BREAK_TIME_12 , '@C_BREAK_TIME_18 : ',@C_BREAK_TIME_18 ,'@C_BREAK_TIME_01 : ', @C_BREAK_TIME_01,'@C_BREAK_TIME_06 : ', @C_BREAK_TIME_06)
 								-- 휴게시간 합계
 								SELECT @C_BREAK_TIME = @C_BREAK_TIME_12 + @C_BREAK_TIME_18 + @C_BREAK_TIME_01 + @C_BREAK_TIME_06
+
 					
 								-- 2019.06.21 추가(김문성 요청)
 								-- 2019.12.19 추가 G01 출근코드 조건 추가
@@ -923,6 +976,8 @@ BEGIN TRY
 										-- 추가된 로직
 										UPDATE HR_TIMEATTENDANCE
 											SET C_NORMAL_TIME = 480
+											,C_NIGHT_TIME = @C_NIGHT_TIME
+											,C_BREAK_TIME = @C_BREAK_TIME
 											,UP_DATETIME = GETDATE()
 											,UP_OPID = 'SYSTEM2'
 										WHERE DKID = @DKID
@@ -951,6 +1006,8 @@ BEGIN TRY
 										AND WORK_DT = @WORK_DT
 									END
 							END
+						
+						
 						ELSE 
 							BEGIN
 								-- 휴일(휴일관련 로직변경 : 2018.07.16)
@@ -1023,7 +1080,7 @@ BEGIN TRY
 							END
 
 						--출근누락 계산 “출근누락”, 출근시간 10시고정하고 시간계산
-						IF ISNULL(@MISS_START,'') = '' AND ISNULL(@MISS_CLOSE,'') != '' 
+						IF ISNULL(@MISS_START,0) = 0 AND ISNULL(@MISS_CLOSE,0) <> 0 
 							BEGIN
 								----print '출근 누락 10시 조정'
 								SET @FIX_PERF = 'G37'
@@ -1033,7 +1090,7 @@ BEGIN TRY
 							END
 
 						--퇴근누락 계산 “퇴근누락”, 퇴근시간 17시고정하고 시간계산
-						IF ISNULL(@MISS_START,'') != ''  AND ISNULL(@MISS_CLOSE,'') = '' 
+						IF ISNULL(@MISS_START,0) <> 0 AND ISNULL(@MISS_CLOSE,0) = 0
 							BEGIN
 								----print '출근 누락 17시 조정'
 								SET @FIX_PERF = 'G38'
@@ -1046,461 +1103,7 @@ BEGIN TRY
 					END
 				
 				END
-				/* 20250618 과거로직 주석
-
-				BEGIN
-					-- --print '== 선택근무제 시간 계산 시작(평일, 휴일제외) =='
-					-- --print '@C_START_TIME(@GW_START_TIME) : ' + CAST(@C_START_TIME AS VARCHAR) + '(' + RTRIM(CAST(@GW_START_TIME AS VARCHAR)) + ')'
-					-- --print '@C_CLOSE_TIME(@GW_CLOSE_TIME) : ' + CAST(@C_CLOSE_TIME AS VARCHAR) + '(' + RTRIM(CAST(@GW_CLOSE_TIME AS VARCHAR)) + ')'
-					IF @WORK_TYPE = 'W'
-						BEGIN
-							-- 근무일 
-							-- 자율(오전) 09 ~ 10 사이에 출근
-							IF  @C_START_TIME < 540 -- 540(8시 이전 출근)
-								SELECT @C_AM = 60
-							ELSE IF @C_START_TIME <= 600 -- 600(10시 이전 출근)
-								SELECT @C_AM = 600 - @C_START_TIME
-					       					 
-							-- 자율(오후) 17 ~ 18 사이에 퇴근
-		-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-							IF (@C_CLOSE_TIME <= 540 OR @C_CLOSE_TIME > 1080) --420(아침 7시 이전) / 1080(오후 18시 이후)
-		/*
-							IF (@C_CLOSE_TIME < 420 OR @C_CLOSE_TIME > 1080) --420(아침 7시 이전) / 1080(오후 18시 이후)
-		*/
-		-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-								SELECT @C_PM = 60
-							ELSE IF @C_CLOSE_TIME > 1020 -- 1020(오후 17시 이후)
-								SELECT @C_PM = @C_CLOSE_TIME - 1020
-
-							-- 정상(코어) 10 ~ 17 사이에 근무
-							IF (@C_AM > 0 AND @C_PM > 0)
-								SELECT @C_CORE = 420
-							ELSE IF (@C_AM = 0 AND @C_PM = 0) 
-								SELECT @C_CORE = @C_CLOSE_TIME - @C_START_TIME
-							ELSE IF @C_AM > 0	
-								SELECT @C_CORE = @C_CLOSE_TIME - 600 
-							ELSE
-								SELECT @C_CORE	=  1020 - @C_START_TIME	
-							-- 2019.11.25 C_NORMALTIME 미적용 수정(선택근무)
-							IF @C_CORE IS NULL 
-								SELECT @C_CORE = 0
-							-- 정상시간 합계
-							-- --print '@C_AM : ' + CAST(@C_AM AS CHAR)
-							-- --print '@C_CORE : ' + CAST(@C_CORE AS CHAR)
-							-- --print '@C_PM : ' + CAST(@C_PM AS CHAR)
-							-- 2019.06.21 추가(김문성 요청)
-							IF (@PERF_CD IN ('G40', 'G41'))
-								BEGIN
-									SELECT @C_HALF_TIME = 240
-								END
-							ELSE IF (@PERF_CD IN ('G47'))
-								BEGIN
-									SELECT @C_HALF_HALF_TIME = 120
-								END
-							-- --print '@C_HALF_TIME : ' + CAST(@C_HALF_TIME AS CHAR)
-							-- --print '@C_HALF_HALF_TIME : ' + CAST(@C_HALF_HALF_TIME AS CHAR)
-
-							-- 시차휴가
-							-- keonhuilee
-							IF (@PERF_CD IN ('G52', 'G53', 'G54', 'G55', 'G56', 'G57', 'G58'))
-								BEGIN
-									-- --print '@GW_R_START_TIME : ' + CAST(@GW_R_START_TIME AS CHAR)
-									-- --print '@GW_R_CLOSE_TIME : ' + CAST(@GW_R_CLOSE_TIME AS CHAR)
-									IF @C_CLOSE_TIME > @C_START_TIME
-										IF ( ((@GW_R_START_TIME <= @C_CLOSE_TIME AND @GW_R_START_TIME >= @C_START_TIME) AND (@GW_R_CLOSE_TIME <= @C_CLOSE_TIME AND @GW_R_CLOSE_TIME >= @C_START_TIME)) OR 
-												((@GW_R_START_TIME <= @CLOSE_TIME AND @GW_R_START_TIME >= @START_TIME) AND (@GW_R_CLOSE_TIME <= @CLOSE_TIME AND @GW_R_CLOSE_TIME >= @START_TIME)) )
-											BEGIN
-												SELECT @C_HALF_TIME = 0
-											END
-										ELSE 
-											BEGIN
-												IF (@PERF_CD = 'G52')
-													BEGIN
-														SELECT @C_HALF_TIME = 60
-													END
-												ELSE IF (@PERF_CD = 'G53')
-													BEGIN
-														SELECT @C_HALF_TIME = 120
-													END
-												ELSE IF (@PERF_CD = 'G54')
-													BEGIN
-														SELECT @C_HALF_TIME = 180
-													END
-												ELSE IF (@PERF_CD = 'G55')
-													BEGIN
-														SELECT @C_HALF_TIME = 240
-													END
-												ELSE IF (@PERF_CD = 'G56')
-													BEGIN
-														SELECT @C_HALF_TIME = 300
-													END
-												ELSE IF (@PERF_CD = 'G57')
-													BEGIN
-														SELECT @C_HALF_TIME = 360
-													END
-												ELSE IF (@PERF_CD = 'G58')
-													BEGIN
-														SELECT @C_HALF_TIME = 420
-													END
-											END
-									ELSE
-										IF ((@GW_R_START_TIME >= @C_START_TIME) OR (@GW_R_START_TIME >= @START_TIME))
-											BEGIN
-												SELECT @C_HALF_TIME = 0
-											END
-										ELSE 
-											BEGIN
-												IF (@PERF_CD = 'G52')
-													BEGIN
-														SELECT @C_HALF_TIME = 60
-													END
-												ELSE IF (@PERF_CD = 'G53')
-													BEGIN
-														SELECT @C_HALF_TIME = 120
-													END
-												ELSE IF (@PERF_CD = 'G54')
-													BEGIN
-														SELECT @C_HALF_TIME = 180
-													END
-												ELSE IF (@PERF_CD = 'G55')
-													BEGIN
-														SELECT @C_HALF_TIME = 240
-													END
-												ELSE IF (@PERF_CD = 'G56')
-													BEGIN
-														SELECT @C_HALF_TIME = 300
-													END
-												ELSE IF (@PERF_CD = 'G57')
-													BEGIN
-														SELECT @C_HALF_TIME = 360
-													END
-												ELSE IF (@PERF_CD = 'G58')
-													BEGIN
-														SELECT @C_HALF_TIME = 420
-													END
-											END
-								END
-							-- --print '시차 휴가 @C_HALF_TIME : ' + CAST(@C_HALF_TIME AS CHAR)
-
-							--SELECT @C_NORMAL_TIME = @C_AM + @C_CORE + @C_PM ( 기존 로직 주석 처리 : 2019.06.21 )
-							SELECT @C_NORMAL_TIME = @C_AM + @C_CORE + @C_PM + @C_HALF_TIME + @C_HALF_HALF_TIME
-
-							-- 지각
-							IF @C_START_TIME - 600 >= 0
-								SELECT @C_LATE_TIME = @C_START_TIME - 600
-							-- --print '@C_LATE_TIME : ' + CAST(@C_LATE_TIME AS CHAR)
-
-							-- 조퇴
-							IF (600 < @C_CLOSE_TIME AND 1020 >= @C_CLOSE_TIME)
-								SELECT @C_EARLY_TIME= 1020 - @C_CLOSE_TIME
-							-- --print '@C_EARLY_TIME : ' + CAST(@C_EARLY_TIME AS CHAR)
-
-							-- 18 ~ 21시 근무 // check
-		-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-							IF (@C_CLOSE_TIME <= 540 OR 1260 <= @C_CLOSE_TIME)
-		/*
-							IF (@C_CLOSE_TIME <= 420 OR 1260 <= @C_CLOSE_TIME)
-		*/
-		-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-								SELECT @C_NIGHT_TIME = 180
-							ELSE IF @C_CLOSE_TIME > 1080 
-								SELECT @C_NIGHT_TIME = @C_CLOSE_TIME - 1080
-							-- --print '@C_NIGHT_TIME : ' + CAST(@C_NIGHT_TIME AS CHAR)
-
-							-- 21 ~ 24시 근무 // check
-							IF @GW_CLOSE_TIME IS NOT NULL AND @GW_CLOSE_TIME > 0
-								BEGIN
-								--	IF @PERF_CD NOT IN ('G52','G53','G54','G55','G56','G57','G58')
-								--		BEGIN
-											-- --print '21 ~ 24시 근무 : 그룹웨어 자료 존재('+ CAST(@GW_CLOSE_TIME AS CHAR) + ')'
-		-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-											IF @C_CLOSE_TIME <= 540
-		/*
-											IF @C_CLOSE_TIME <= 420
-		*/
-		-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-												SELECT @C_MIDNIGHT_TIME = 180
-											ELSE IF @C_CLOSE_TIME - 1260 > 0
-												SELECT @C_MIDNIGHT_TIME = @C_CLOSE_TIME - 1260
-								--		END
-								END
-							-- --print '@C_MIDNIGHT_TIME : ' + CAST(@C_MIDNIGHT_TIME AS CHAR)
-
-							-- 02 ~ 07시 근무 // check
-							IF @GW_CLOSE_TIME IS NOT NULL AND @GW_CLOSE_TIME > 0 
-								BEGIN
-								--	IF @PERF_CD NOT IN ('G52','G53','G54','G55','G56','G57','G58')
-								--		BEGIN
-		-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-											-- --print '02 ~ 09시 근무 : 그룹웨어 자료 존재('+ CAST(@GW_CLOSE_TIME AS CHAR) + ')'
-											IF @C_CLOSE_TIME <= 540
-												SELECT @C_ALLNIGHT_TIME = @C_CLOSE_TIME
-		/*
-											-- --print '02 ~ 07시 근무 : 그룹웨어 자료 존재('+ CAST(@GW_CLOSE_TIME AS CHAR) + ')'
-											IF @C_CLOSE_TIME <= 420
-												SELECT @C_ALLNIGHT_TIME = @C_CLOSE_TIME
-		*/
-		-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-								--		END
-								END
-							-- --print '@C_ALLNIGHT_TIME : ' + CAST(@C_ALLNIGHT_TIME AS CHAR)
-											
-							-- 휴게시간 // 12~13시
-		-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-							IF (@C_START_TIME <= 720 AND @C_CLOSE_TIME <= 540 ) OR (@C_START_TIME <= 720 AND 780 <= @C_CLOSE_TIME )						 
-		/*
-							IF (@C_START_TIME <= 720 AND @C_CLOSE_TIME <= 420 ) OR (@C_START_TIME <= 720 AND 780 <= @C_CLOSE_TIME )						 
-		*/
-		-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-								 SELECT @C_BREAK_TIME_12 = 60
-							ELSE IF (720 < @C_START_TIME AND @C_START_TIME <= 780 ) 
-								SELECT @C_BREAK_TIME_12 = 780 - @C_START_TIME
-							-- --print '@C_BREAK_TIME_12 : ' + CAST(@C_BREAK_TIME_12 AS CHAR)
-
-							-- 출근시간 9시 이전일 경우 9시 출근으로 산정(김문성 사원 답변)
-							IF @C_START_TIME < 540
-								SELECT @C_ST_TIME = 540
-							ELSE
-								SELECT @C_ST_TIME = @C_START_TIME
-							-- --print '@C_ST_TIME : ' + CAST(@C_ST_TIME AS CHAR)
-
-							-- 퇴근시간 9시 이후는 그룹웨어 신청건만 적용하므로 저녁9시까지만 적용(김문성 사원 답변)
-							IF @C_CLOSE_TIME > 1260
-								SELECT @C_ET_TIME = 1260
-							ELSE IF @C_CLOSE_TIME < 540
-								SELECT @C_ET_TIME = 1260
-							ELSE
-								SELECT @C_ET_TIME = @C_CLOSE_TIME
-							-- --print '@C_ET_TIME : ' + CAST(@C_ET_TIME AS CHAR)
-		-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-							-- 18 ~ 21시 근무(2018.08.21 / 김문성 사원 요청)
-							-- --print '@18시 휴게시간을 위한 정상근무시간 계산 : ' + CAST(@C_ET_TIME - @C_ST_TIME AS CHAR)
-		/*
-							IF @C_ST_TIME >= 720
-								BEGIN
-									-- --print '12시 이후 출근('+  RTRIM(CAST(@C_ET_TIME - (@C_ST_TIME + 480) AS CHAR)) + ')'
-									IF (@C_ET_TIME - @C_ST_TIME) >= 480
-										BEGIN
-											IF @C_ET_TIME - (@C_ST_TIME + 480) < 60
-												SELECT @C_BREAK_TIME_18 = @C_ET_TIME - (@C_ST_TIME + 480)
-											ELSE
-												SELECT @C_BREAK_TIME_18 = 60
-										END
-								END
-		*/
-							IF @C_ST_TIME >= 600
-								BEGIN
-									-- --print '10시 이후 출근('+  RTRIM(CAST(@C_ET_TIME - (@C_ST_TIME + 540) AS CHAR)) + ')'
-									IF @C_NIGHT_TIME >= 120
-										SELECT @C_BREAK_TIME_18 = 60
-									ELSE
-										SELECT @C_BREAK_TIME_18 = 0
-								END
-							ELSE
-								BEGIN
-		-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-									-- --print '10시 이전 출근('+  RTRIM(CAST(@C_ET_TIME - (@C_ST_TIME + 540) AS CHAR)) + ')'
-									IF @C_NIGHT_TIME >= 120
-										SELECT @C_BREAK_TIME_18 = 60
-									ELSE
-										SELECT @C_BREAK_TIME_18 = 0
-		/*
-									-- --print '12시 이전 출근('+  RTRIM(CAST(@C_ET_TIME - (@C_ST_TIME + 540) AS CHAR)) + ')'
-									IF (@C_ET_TIME - @C_ST_TIME) >= 540
-										BEGIN
-											IF @C_ET_TIME - (@C_ST_TIME + 540) < 60
-												SELECT @C_BREAK_TIME_18 = @C_ET_TIME - (@C_ST_TIME + 540)
-											ELSE
-												SELECT @C_BREAK_TIME_18 = 60 
-										END
-		*/
-		-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-								END
-							-- --print '@C_BREAK_TIME_18_NEW : ' + CAST(@C_BREAK_TIME_18 AS CHAR)
-
-							/* 1차 작업....
-							IF (@C_ET_TIME - @C_ST_TIME) >= 480 
-								-- --print '@BREAK_TIME_18_1 : ' + CAST(@C_CLOSE_TIME - @C_START_TIME AS CHAR)
-								-- --print '@BREAK_TIME_18_2 : ' + CAST(@C_CLOSE_TIME - (@C_START_TIME + 480) AS CHAR)
-								IF @C_CLOSE_TIME - (@C_START_TIME + 480) < 60
-									SELECT @C_BREAK_TIME_18 = @C_CLOSE_TIME - (@C_START_TIME + 480)
-								ELSE IF @C_CLOSE_TIME - (@C_START_TIME + 480) > 60
-									SELECT @C_BREAK_TIME_18 = 60
-							*/
-
-							/* 주석처리 : 2018.08.21 ( 김문성 사원 요청으로 처리 )
-							-- 18 ~ 21시 근무 중 20시 이후근무했을 경우만 휴게시간 집계(19:59 이전은 휴게시간 없음, 20:00 이후만 휴게시간 1시간 집계)
-							IF @C_NIGHT_TIME >= 120
-								SELECT @C_BREAK_TIME_18 = 60
-							ELSE
-								SELECT @C_BREAK_TIME_18 = 0
-							-- --print '@C_BREAK_TIME_18_OLD : ' + CAST(@C_BREAK_TIME_18 AS CHAR)
-							*/
-
-							/* 주석처리 : 2018.07.12 ( 김문성 사원 요청으로 처리 )
-							-- 휴게시간 // 18~19
-							IF @C_NIGHT_TIME > 60						 
-									SELECT @C_BREAK_TIME_18 = 60
-							ELSE IF @C_NIGHT_TIME > 0
-								SELECT @C_BREAK_TIME_18 = @C_NIGHT_TIME
-							-- --print '@C_BREAK_TIME_18 : ' + CAST(@C_BREAK_TIME_18 AS CHAR)
-							*/
-
-		-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-							-- 휴게 시간 변경
-							IF @C_ST_TIME >= 600
-								BEGIN
-									IF @C_ALLNIGHT_TIME >= 240
-										BEGIN
-											IF @C_ALLNIGHT_TIME  - 240 < 60
-												SELECT @C_BREAK_TIME_01 = @C_ALLNIGHT_TIME - 240
-											ELSE
-												SELECT @C_BREAK_TIME_01 = 60
-										END
-								END
-							ELSE 
-								IF @C_ALLNIGHT_TIME >= 180
-									BEGIN
-										IF @C_ALLNIGHT_TIME - 180 - (60 - @C_AM) < 0
-											SELECT @C_BREAK_TIME_01 = 0
-										ELSE IF	@C_ALLNIGHT_TIME - 180 - (60 - @C_AM) < 60
-											SELECT @C_BREAK_TIME_01 = @C_ALLNIGHT_TIME - 180 - (60 - @C_AM) 
-										ELSE
-											SELECT @C_BREAK_TIME_01 = 60
-									END
-							-- --print '@C_BREAK_TIME_01 : ' + CAST(@C_BREAK_TIME_01 AS CHAR)
-		/*
-							-- 휴게시간 // 01~02
-							IF @C_ALLNIGHT_TIME >= 120						 
-								 SELECT @C_BREAK_TIME_01 = 60
-							ELSE IF @C_ALLNIGHT_TIME > 60
-								 SELECT @C_BREAK_TIME_01 = @C_ALLNIGHT_TIME - 60
-							ELSE 
-								SELECT @C_BREAK_TIME_01 = 0
-							-- --print '@C_BREAK_TIME_01 : ' + CAST(@C_BREAK_TIME_01 AS CHAR)
-
-							-- 휴게시간 // 06~07
-							IF (@C_CLOSE_TIME > 360 AND @C_CLOSE_TIME <= 420)
-								 SELECT @C_BREAK_TIME_06 = @C_CLOSE_TIME - 360
-							-- --print '@C_BREAK_TIME_06 : ' + CAST(@C_BREAK_TIME_06 AS CHAR)
-		*/
-		-- 2020.11.03 선택적근로시간제 휴게시간 기준 수정 - keonhuilee
-
-							-- 휴게시간 합계
-							SELECT @C_BREAK_TIME = @C_BREAK_TIME_12 + @C_BREAK_TIME_18 + @C_BREAK_TIME_01 + @C_BREAK_TIME_06
-					
-							-- 2019.06.21 추가(김문성 요청)
-							-- 2019.12.19 추가 G01 출근코드 조건 추가
-							IF (@PERF_CD = 'G01' AND (@C_PM <= 0 OR @C_PM IS NULL))
-								BEGIN
-								-- --print '출근시 C_NORMAL_TIME 미수정'
-									-- 반영(기존로직)
-									UPDATE HR_TIMEATTENDANCE
-										SET C_NIGHT_TIME = @C_NIGHT_TIME
-										,C_MIDNIGHT_TIME = @C_MIDNIGHT_TIME
-										,C_ALLNIGHT_TIME = @C_ALLNIGHT_TIME
-										,C_BREAK_TIME = @C_BREAK_TIME						
-										,C_LATE_TIME = @C_LATE_TIME
-										,C_EARLY_TIME = @C_EARLY_TIME
-										,UP_DATETIME = GETDATE()
-										,UP_OPID = 'SYSTEM'
-									WHERE DKID = @DKID
-									AND WORK_DT = @WORK_DT
-								END
-							ELSE IF (@PERF_CD IN ('G05','G14','G15','G17','G22','G23','G26','G29'))
-								BEGIN
-									-- 추가된 로직
-									UPDATE HR_TIMEATTENDANCE
-										SET C_NORMAL_TIME = 480
-										,UP_DATETIME = GETDATE()
-										,UP_OPID = 'SYSTEM2'
-									WHERE DKID = @DKID
-									AND WORK_DT = @WORK_DT
-								END
-							ELSE
-								BEGIN
-									-- 반영(기존로직)
-									UPDATE HR_TIMEATTENDANCE
-										SET C_NORMAL_TIME = @C_NORMAL_TIME
-										,C_NIGHT_TIME = @C_NIGHT_TIME
-										,C_MIDNIGHT_TIME = @C_MIDNIGHT_TIME
-										,C_ALLNIGHT_TIME = @C_ALLNIGHT_TIME
-										,C_BREAK_TIME = @C_BREAK_TIME						
-										,C_LATE_TIME = @C_LATE_TIME
-										,C_EARLY_TIME = @C_EARLY_TIME
-										,UP_DATETIME = GETDATE()
-										,UP_OPID = 'SYSTEM'
-									WHERE DKID = @DKID
-									AND WORK_DT = @WORK_DT
-								END
-						END
-					ELSE 
-						BEGIN
-							-- 휴일(휴일관련 로직변경 : 2018.07.16)
-							-- 기존 로직에서 24시 이후 퇴근할 경우 계산하는 로직 추가(ELSE 이하 부분)(2018.07.16)
-							-- 추가변경 ( 2018.09.27 김문성 요청 )
-							-- 추가변경1 : 그룹웨어에서 신청내역이 들어올 경우 휴일 근무에 대해서 시간을 계산함
-							-- 추가변경2 : 휴일근무 시간(그룹웨어에서 신청한 시작시간, 마감시간)을 가져와서 시간을 계산함
-							-- --print '== 휴일 시간 계산 시작 =='
-							-- --print '@C_START_TIME(@GW_START_TIME) : ' + CAST(@C_START_TIME AS VARCHAR) + '(' + RTRIM(CAST(@GW_START_TIME AS VARCHAR)) + ')'
-							-- --print '@C_CLOSE_TIME(@GW_CLOSE_TIME) : ' + CAST(@C_CLOSE_TIME AS VARCHAR) + '(' + RTRIM(CAST(@GW_CLOSE_TIME AS VARCHAR)) + ')'
-							IF @GW_CLOSE_TIME IS NOT NULL AND @GW_CLOSE_TIME > 0
-								BEGIN
-									SELECT @C_CLOSE_TIME = @GW_CLOSE_TIME
-									-- --print '퇴근시간(그룹웨어 퇴근시간) : ' + CAST(@C_CLOSE_TIME AS VARCHAR) + '(' + RTRIM(CAST(@GW_CLOSE_TIME AS VARCHAR)) + ')'
-									IF (@C_START_TIME IS NOT NULL AND @C_CLOSE_TIME IS NOT NULL) 
-										BEGIN
-											IF @C_CLOSE_TIME > @C_START_TIME
-												BEGIN			
-													IF (@C_CLOSE_TIME - @C_START_TIME) - ((@C_CLOSE_TIME - @C_START_TIME)/300)*300 > 240
-														BEGIN
-															SELECT @C_BREAK_TIME = ((@C_CLOSE_TIME - @C_START_TIME) - ((@C_CLOSE_TIME - @C_START_TIME)/300)*300)%240
-
-															SELECT @C_BREAK_TIME = @C_BREAK_TIME + ((@C_CLOSE_TIME - @C_START_TIME)/300)*60
-														END	
-													ELSE
-														BEGIN
-															SELECT @C_BREAK_TIME = ((@C_CLOSE_TIME - @C_START_TIME)/300)*60
-														END
-						
-
-													SELECT @C_NORMAL_TIME = (@C_CLOSE_TIME - @C_START_TIME) - @C_BREAK_TIME
-						
-												END
-											ELSE
-												BEGIN
-													SET @C_CLOSE_TIME = 1440 + @C_CLOSE_TIME
-													IF (@C_CLOSE_TIME - @C_START_TIME) - ((@C_CLOSE_TIME - @C_START_TIME)/300)*300 > 240
-														BEGIN
-															SELECT @C_BREAK_TIME = ((@C_CLOSE_TIME - @C_START_TIME) - ((@C_CLOSE_TIME - @C_START_TIME)/300)*300)%240
-
-															SELECT @C_BREAK_TIME = @C_BREAK_TIME + ((@C_CLOSE_TIME - @C_START_TIME)/300)*60
-														END	
-													ELSE
-														BEGIN
-															SELECT @C_BREAK_TIME = ((@C_CLOSE_TIME - @C_START_TIME)/300)*60
-														END
-						
-
-													SELECT @C_NORMAL_TIME = (@C_CLOSE_TIME - @C_START_TIME) - @C_BREAK_TIME
-						
-												END
-						
-
-											-- 반영
-											UPDATE HR_TIMEATTENDANCE
-											SET C_NORMAL_TIME = @C_NORMAL_TIME
-												,C_BREAK_TIME = @C_BREAK_TIME						
-												,UP_DATETIME = GETDATE()
-												,UP_OPID = 'SYSTEM'
-											WHERE DKID = @DKID
-											AND WORK_DT = @WORK_DT
-										END
-								END
-						END
-				END
-	
-				*/
+		
 	-- 근태값 NONE
 	
 
@@ -1556,19 +1159,13 @@ BEGIN TRY
 							AND WORK_DT = @WORK_DT
 							AND PERF_CD = 'G51'
 						END
-					ELSE IF ISNULL(@START_TIME,'') != '' AND ISNULL(@CLOSE_TIME,'') != ''
+					ELSE IF ISNULL(@START_TIME,0) <> 0 AND ISNULL(@CLOSE_TIME,0) <> 0
 						BEGIN
 							PRINT('공가 _ 시간이 둘다 있음')
 							UPDATE dbo.HR_TIMEATTENDANCE
 							SET START_TIME = @START_TIME
 								,CLOSE_TIME = @CLOSE_TIME
-								--,LATE_TIME =  ROUND((dbo.fn_calc_time_late(@START_TIME))/60,0,1) + ((dbo.fn_calc_time_late(@START_TIME))%60)/CAST(100 AS FLOAT) 
-								--,EARLY_TIME = ROUND((dbo.fn_calc_time_early(@CLOSE_TIME))/60,0,1) + ((dbo.fn_calc_time_early(@CLOSE_TIME))%60)/CAST(100 AS FLOAT)
-								--,NORMAL_TIME = ROUND((dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@START_TIME,@CLOSE_TIME, dbo.fn_calc_time_late(@START_TIME),dbo.fn_calc_time_early(@CLOSE_TIME)))/60,0,1) 
-								--+ ((dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@START_TIME,@CLOSE_TIME, dbo.fn_calc_time_late(@START_TIME),dbo.fn_calc_time_early(@CLOSE_TIME)))%60)/CAST(100 AS FLOAT)
-								--,NIGHT_TIME = ROUND((dbo.fn_calc_time_night(@CLOSE_TIME))/60,0,1) + ((dbo.fn_calc_time_night(@CLOSE_TIME))%60)/CAST(100 AS FLOAT) 
-								--,MIDNIGHT_TIME = ROUND((dbo.fn_calc_time_midnight(@CLOSE_TIME))/60,0,1) + ((dbo.fn_calc_time_midnight(@CLOSE_TIME))%60)/CAST(100 AS FLOAT)
-								--,ALLNIG_TIME = ROUND((dbo.fn_calc_time_allnig(@CLOSE_TIME))/60,0,1) + ((dbo.fn_calc_time_allnig(@CLOSE_TIME))%60)/CAST(100 AS FLOAT)
+
 								,LATE_TIME =  dbo.fn_calc_time_late(@START_TIME)
 								,EARLY_TIME = dbo.fn_calc_time_early(@CLOSE_TIME)
 								,NORMAL_TIME = dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@START_TIME,@CLOSE_TIME, dbo.fn_calc_time_late(@START_TIME),dbo.fn_calc_time_early(@CLOSE_TIME))
@@ -1630,14 +1227,7 @@ BEGIN TRY
 				BEGIN
 					PRINT CONCAT('출장 시간이 있음',@START_TIME,' - ',@CLOSE_TIME)
 					UPDATE dbo.HR_TIMEATTENDANCE
-					--SET LATE_TIME =  ROUND((dbo.fn_calc_time_late(@START_TIME))/60,0,1) + ((dbo.fn_calc_time_late(@START_TIME))%60)/CAST(100 AS FLOAT) 
-					--	,EARLY_TIME = ROUND((dbo.fn_calc_time_early(@CLOSE_TIME))/60,0,1) + ((dbo.fn_calc_time_early(@CLOSE_TIME))%60)/CAST(100 AS FLOAT)
-					--	,NORMAL_TIME = ROUND((dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@START_TIME,@CLOSE_TIME, dbo.fn_calc_time_late(@START_TIME),dbo.fn_calc_time_early(@CLOSE_TIME)))/60,0,1) 
-					--				+ ((dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@START_TIME,@CLOSE_TIME, dbo.fn_calc_time_late(@START_TIME),dbo.fn_calc_time_early(@CLOSE_TIME)))%60)/CAST(100 AS FLOAT)
-					--	,NIGHT_TIME = ROUND((dbo.fn_calc_time_night(@CLOSE_TIME))/60,0,1) + ((dbo.fn_calc_time_night(@CLOSE_TIME))%60)/CAST(100 AS FLOAT)
 
-					--	,MIDNIGHT_TIME = ROUND((dbo.fn_calc_time_midnight(@CLOSE_TIME))/60,0,1) + ((dbo.fn_calc_time_midnight(@CLOSE_TIME))%60)/CAST(100 AS FLOAT)
-					--	,ALLNIG_TIME = ROUND((dbo.fn_calc_time_allnig(@CLOSE_TIME))/60,0,1) + ((dbo.fn_calc_time_allnig(@CLOSE_TIME))%60)/CAST(100 AS FLOAT)
 					SET	LATE_TIME =  dbo.fn_calc_time_late(@START_TIME)
 						,EARLY_TIME = dbo.fn_calc_time_early(@CLOSE_TIME)
 						,NORMAL_TIME = dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@START_TIME,@CLOSE_TIME, dbo.fn_calc_time_late(@START_TIME),dbo.fn_calc_time_early(@CLOSE_TIME))
@@ -1706,9 +1296,9 @@ BEGIN TRY
 
 			UPDATE HR_TIMEATTENDANCE
 				SET PERF_CD = @FIX_PERF
-				,START_TIME = IIF(@START_TIME != 0, @MISS_START, '')
+				,START_TIME = IIF(@START_TIME   <> 0, @MISS_START, NULL)
 				--,CLOSE_TIME = IIF(@CLOSE_TIME != 0, @MISS_CLOSE, '')
-				,C_START_TIME = IIF(@C_START_TIME != 0, @MISS_START, '')
+				,C_START_TIME = IIF(@C_START_TIME <> 0, @MISS_START, NULL)
 				--,C_CLOSE_TIME = IIF(@C_CLOSE_TIME != 0, @MISS_CLOSE, '')
 				,GW_CLOSE_TIME = @GW_CLOSE_TIME		
 				,LATE_TIME = IIF(@CHOICE_WORK = 'N', dbo.fn_calc_time_late(@MISS_START), 0)
@@ -1725,21 +1315,6 @@ BEGIN TRY
 				,C_MIDNIGHT_TIME = IIF(@CHOICE_WORK = 'Y', dbo.fn_calc_time_midnight(@MISS_CLOSE), 0)
 				,C_ALLNIGHT_TIME = IIF(@CHOICE_WORK = 'Y', dbo.fn_calc_time_allnig(@MISS_CLOSE), 0)
 				,C_BREAK_TIME = 60 
-				--,LATE_TIME = IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_late(@MISS_START))/60,0,1) + ((dbo.fn_calc_time_late(@MISS_START))%60)/CAST(100 AS FLOAT), 0)
-				--,EARLY_TIME = IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_early(@MISS_CLOSE))/60,0,1) + ((dbo.fn_calc_time_early(@MISS_CLOSE))%60)/CAST(100 AS FLOAT), 0)
-				--,NORMAL_TIME = IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@MISS_START,@MISS_CLOSE, dbo.fn_calc_time_late(@MISS_START),dbo.fn_calc_time_early(@MISS_CLOSE)))/60,0,1) 
-				--			+ ((dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@MISS_START,@MISS_CLOSE, dbo.fn_calc_time_late(@MISS_START),dbo.fn_calc_time_early(@MISS_CLOSE)))%60)/CAST(100 AS FLOAT),  0)
-				--,NIGHT_TIME = IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_night(@MISS_CLOSE))/60,0,1) + ((dbo.fn_calc_time_night(@MISS_CLOSE))%60)/CAST(100 AS FLOAT), 0) 
-				--,MIDNIGHT_TIME = IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_midnight(@MISS_CLOSE))/60,0,1) + ((dbo.fn_calc_time_midnight(@MISS_CLOSE))%60)/CAST(100 AS FLOAT), 0)
-				--,ALLNIG_TIME = IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_allnig(@MISS_CLOSE))/60,0,1) + ((dbo.fn_calc_time_allnig(@MISS_CLOSE))%60)/CAST(100 AS FLOAT), 0)
-
-				--,C_LATE_TIME =  IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_late(@MISS_START))/60,0,1) + ((dbo.fn_calc_time_late(@MISS_START))%60)/CAST(100 AS FLOAT) , 0)
-				--,C_EARLY_TIME = IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_early(@MISS_CLOSE))/60,0,1) + ((dbo.fn_calc_time_early(@MISS_CLOSE))%60)/CAST(100 AS FLOAT), 0)
-				--,C_NORMAL_TIME = IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@MISS_START,@MISS_CLOSE, dbo.fn_calc_time_late(@MISS_START),dbo.fn_calc_time_early(@MISS_CLOSE)))/60,0,1) 
-				--			+ ((dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@MISS_START,@MISS_CLOSE, dbo.fn_calc_time_late(@MISS_START),dbo.fn_calc_time_early(@MISS_CLOSE)))%60)/CAST(100 AS FLOAT), 0)
-				--,C_NIGHT_TIME = IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_night(@MISS_CLOSE))/60,0,1) + ((dbo.fn_calc_time_night(@MISS_CLOSE))%60)/CAST(100 AS FLOAT), 0)
-				--,C_MIDNIGHT_TIME = IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_midnight(@MISS_CLOSE))/60,0,1) + ((dbo.fn_calc_time_midnight(@MISS_CLOSE))%60)/CAST(100 AS FLOAT), 0)
-				--,C_ALLNIGHT_TIME = IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_allnig(@MISS_CLOSE))/60,0,1) + ((dbo.fn_calc_time_allnig(@MISS_CLOSE))%60)/CAST(100 AS FLOAT), 0)
 
 
 				,UP_DATETIME = GETDATE()
@@ -1777,21 +1352,6 @@ BEGIN TRY
 				,C_MIDNIGHT_TIME = IIF(@CHOICE_WORK = 'Y', dbo.fn_calc_time_midnight(@MISS_CLOSE), 0)
 				,C_ALLNIGHT_TIME = IIF(@CHOICE_WORK = 'Y', dbo.fn_calc_time_allnig(@MISS_CLOSE), 0)
 				,C_BREAK_TIME = 60
-				--,LATE_TIME =  IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_late(@MISS_START))/60,0,1) + ((dbo.fn_calc_time_late(@MISS_START))%60)/CAST(100 AS FLOAT) ,0)
-				--,EARLY_TIME = IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_early(@MISS_CLOSE))/60,0,1) + ((dbo.fn_calc_time_early(@MISS_CLOSE))%60)/CAST(100 AS FLOAT) ,0)
-				--,NORMAL_TIME = IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@MISS_START,@MISS_CLOSE, dbo.fn_calc_time_late(@MISS_START),dbo.fn_calc_time_early(@MISS_CLOSE)))/60,0,1) 
-				--			+ ((dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@MISS_START,@MISS_CLOSE, dbo.fn_calc_time_late(@MISS_START),dbo.fn_calc_time_early(@MISS_CLOSE)))%60)/CAST(100 AS FLOAT), 0)
-				--,NIGHT_TIME = IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_night(@MISS_CLOSE))/60,0,1) + ((dbo.fn_calc_time_night(@MISS_CLOSE))%60)/CAST(100 AS FLOAT), 0)
-				--,MIDNIGHT_TIME = IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_midnight(@MISS_CLOSE))/60,0,1) + ((dbo.fn_calc_time_midnight(@MISS_CLOSE))%60)/CAST(100 AS FLOAT), 0)
-				--,ALLNIG_TIME = IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_allnig(@MISS_CLOSE))/60,0,1) + ((dbo.fn_calc_time_allnig(@MISS_CLOSE))%60)/CAST(100 AS FLOAT), 0)
-						
-				--,C_LATE_TIME =  IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_late(@MISS_START))/60,0,1) + ((dbo.fn_calc_time_late(@MISS_START))%60)/CAST(100 AS FLOAT) ,0)
-				--,C_EARLY_TIME = IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_early(@MISS_CLOSE))/60,0,1) + ((dbo.fn_calc_time_early(@MISS_CLOSE))%60)/CAST(100 AS FLOAT) ,0)
-				--,C_NORMAL_TIME = IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@MISS_START,@MISS_CLOSE, dbo.fn_calc_time_late(@MISS_START),dbo.fn_calc_time_early(@MISS_CLOSE)))/60,0,1) 
-				--			+ ((dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@MISS_START,@MISS_CLOSE, dbo.fn_calc_time_late(@MISS_START),dbo.fn_calc_time_early(@MISS_CLOSE)))%60)/CAST(100 AS FLOAT), 0)
-				--,C_NIGHT_TIME = IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_night(@MISS_CLOSE))/60,0,1) + ((dbo.fn_calc_time_night(@MISS_CLOSE))%60)/CAST(100 AS FLOAT), 0)
-				--,C_MIDNIGHT_TIME = IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_midnight(@MISS_CLOSE))/60,0,1) + ((dbo.fn_calc_time_midnight(@MISS_CLOSE))%60)/CAST(100 AS FLOAT), 0)
-				--,C_ALLNIGHT_TIME = IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_allnig(@MISS_CLOSE))/60,0,1) + ((dbo.fn_calc_time_allnig(@MISS_CLOSE))%60)/CAST(100 AS FLOAT), 0)
 
 				,UP_DATETIME = GETDATE()
 				,UP_OPID = 'SYSTEM'
@@ -1840,21 +1400,6 @@ BEGIN TRY
 				,C_MIDNIGHT_TIME = IIF(@CHOICE_WORK = 'Y', dbo.fn_calc_time_midnight(@MISS_CLOSE), 0)
 				,C_ALLNIGHT_TIME = IIF(@CHOICE_WORK = 'Y', dbo.fn_calc_time_allnig(@MISS_CLOSE), 0)
 				,C_BREAK_TIME = 60 
-				--,LATE_TIME =  IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_late(@START_TIME))/60,0,1) + ((dbo.fn_calc_time_late(@START_TIME))%60)/CAST(100 AS FLOAT),0) 
-				--,EARLY_TIME = IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_early(@CLOSE_TIME))/60,0,1) + ((dbo.fn_calc_time_early(@CLOSE_TIME))%60)/CAST(100 AS FLOAT), 0)
-				--,NORMAL_TIME = IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@START_TIME,@CLOSE_TIME, dbo.fn_calc_time_late(@START_TIME),dbo.fn_calc_time_early(@CLOSE_TIME)))/60,0,1) 
-				--			+ ((dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@START_TIME,@CLOSE_TIME, dbo.fn_calc_time_late(@START_TIME),dbo.fn_calc_time_early(@CLOSE_TIME)))%60)/CAST(100 AS FLOAT), 0)
-				--,NIGHT_TIME = IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_night(@CLOSE_TIME))/60,0,1) + ((dbo.fn_calc_time_night(@CLOSE_TIME))%60)/CAST(100 AS FLOAT) ,0)
-				--,MIDNIGHT_TIME = IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_midnight(@CLOSE_TIME))/60,0,1) + ((dbo.fn_calc_time_midnight(@CLOSE_TIME))%60)/CAST(100 AS FLOAT) ,0)
-				--,ALLNIG_TIME = IIF(@CHOICE_WORK = 'N', ROUND((dbo.fn_calc_time_allnig(@CLOSE_TIME))/60,0,1) + ((dbo.fn_calc_time_allnig(@CLOSE_TIME))%60)/CAST(100 AS FLOAT), 0)
-
-				--,C_LATE_TIME =  IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_late(@START_TIME))/60,0,1) + ((dbo.fn_calc_time_late(@START_TIME))%60)/CAST(100 AS FLOAT) ,0)
-				--,C_EARLY_TIME = IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_early(@CLOSE_TIME))/60,0,1) + ((dbo.fn_calc_time_early(@CLOSE_TIME))%60)/CAST(100 AS FLOAT), 0)
-				--,C_NORMAL_TIME = IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@START_TIME,@CLOSE_TIME, dbo.fn_calc_time_late(@START_TIME),dbo.fn_calc_time_early(@CLOSE_TIME)))/60,0,1) 
-				--			+ ((dbo.fn_calc_time_nomal(@WORK_TYPE,@FIX_PERF,@START_TIME,@CLOSE_TIME, dbo.fn_calc_time_late(@START_TIME),dbo.fn_calc_time_early(@CLOSE_TIME)))%60)/CAST(100 AS FLOAT), 0)
-				--,C_NIGHT_TIME = IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_night(@CLOSE_TIME))/60,0,1) + ((dbo.fn_calc_time_night(@CLOSE_TIME))%60)/CAST(100 AS FLOAT), 0)
-				--,C_MIDNIGHT_TIME = IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_midnight(@CLOSE_TIME))/60,0,1) + ((dbo.fn_calc_time_midnight(@CLOSE_TIME))%60)/CAST(100 AS FLOAT), 0)
-				--,C_ALLNIGHT_TIME = IIF(@CHOICE_WORK = 'Y', ROUND((dbo.fn_calc_time_allnig(@CLOSE_TIME))/60,0,1) + ((dbo.fn_calc_time_allnig(@CLOSE_TIME))%60)/CAST(100 AS FLOAT), 0)
 
 
 				,UP_DATETIME = GETDATE()
@@ -1870,71 +1415,6 @@ BEGIN TRY
 	-- 모든 처리 종료.
 	COMPLATE_PROCESS:
 		
-		/* 새롭게 추가 / 2018.07.27 / 박빛나 실장 요청 
-		BEGIN
-			-- --print '공가 처리'
-			-- --print '코드 :' + CAST(@PERF_CD AS VARCHAR)
-			2025-06-18 코드 주석, 상단에서 호출되면 해당 영역 찾아가도록 수정.
-			IF @PERF_CD = 'G51'
-				BEGIN
-					UPDATE dbo.HR_TIMEATTENDANCE
-					SET START_TIME = NULL
-						,CLOSE_TIME = NULL
-						,LATE_TIME = NULL 
-						,EARLY_TIME = NULL 
-						,NORMAL_TIME = NULL 
-						,NIGHT_TIME = NULL 
-						,MIDNIGHT_TIME = NULL 
-						,ALLNIG_TIME = NULL 
-						,C_START_TIME = NULL
-						,C_CLOSE_TIME = NULL
-						,C_NORMAL_TIME = NULL
-						,C_PRIV_TIME = NULL
-						,C_NIGHT_TIME = NULL 
-						,C_MIDNIGHT_TIME = NULL 
-						,C_ALLNIGHT_TIME = NULL 
-						,C_BREAK_TIME = NULL 
-						,UP_DATETIME = GETDATE()
-						,UP_OPID = 'SYSTEM'		
-					WHERE DKID = @DKID
-					AND WORK_DT = @WORK_DT
-					AND PERF_CD = 'G51'
-				END
-		END
-		*/
-		/* 새롭게 추가 / 2018.07.27 / 박빛나 실장 요청
-		2025-06-18 코드 주석, 상단에서 호출되면 해당 영역 찾아가도록 수정.
-		BEGIN
-			-- --print '기타교육 로직 처리'
-			-- --print '코드 :' + CAST(@PERF_CD AS VARCHAR)
-			IF @PERF_CD = 'G18'
-				BEGIN
-					UPDATE dbo.HR_TIMEATTENDANCE
-					SET START_TIME = NULL
-						,CLOSE_TIME = NULL
-						,LATE_TIME = NULL 
-						,EARLY_TIME = NULL 
-						,NORMAL_TIME = NULL 
-						,NIGHT_TIME = NULL 
-						,MIDNIGHT_TIME = NULL 
-						,ALLNIG_TIME = NULL 
-						,C_START_TIME = NULL
-						,C_CLOSE_TIME = NULL
-						,C_NORMAL_TIME = NULL
-						,C_PRIV_TIME = NULL
-						,C_NIGHT_TIME = NULL 
-						,C_MIDNIGHT_TIME = NULL 
-						,C_ALLNIGHT_TIME = NULL 
-						,C_BREAK_TIME = NULL 
-						,UP_DATETIME = GETDATE()
-						,UP_OPID = 'SYSTEM'		
-					WHERE DKID = @DKID
-					AND WORK_DT = @WORK_DT
-					AND PERF_CD = 'G18'
-				END
-		END
-		 */
-    -- -- -- --print '== HR_TIMEATTENDANCE 프로시저 종료 (USP_CALCULATE_TIMEATTENDANCE) ==';
 
 END TRY
 BEGIN CATCH
@@ -1947,10 +1427,5 @@ BEGIN CATCH
 	DECLARE @ErrorLine INT = ERROR_LINE();
 	DECLARE @ErrorProcedure NVARCHAR(200) = ERROR_PROCEDURE();
 
-	-- -- -- --print 'ErrorMessage: ' + @ErrorMessage;
-	-- -- -- --print 'ErrorLine: ' + CAST(@ErrorLine AS VARCHAR);
-	-- -- -- --print 'ErrorProcedure: ' + @ErrorProcedure;
-	-- 필요시 오류 로그 테이블에 기록
-	-- RAISERROR(@ErrorMessage, @ErrorSeverity, @ErrorState); -- 호출한 곳으로 오류 전파
 END CATCH
 
