@@ -35,5 +35,7 @@ WATCHLIST_US = {
 # 카카오 개발자 콘솔 > 앱 > 플랫폼에 등록된 도메인이어야 합니다.
 DEFAULT_LINK_URL = "https://finance.naver.com"
 
-# 사용할 Claude 모델 (인사이트 생성용)
-CLAUDE_MODEL = "claude-sonnet-4-6"
+# 사용할 OpenAI 모델 (인사이트 생성용)
+# - gpt-4o-mini: 저렴하고 빠름 (권장)
+# - gpt-4o: 더 똑똑하지만 약 16배 비쌈
+OPENAI_MODEL = "gpt-4o-mini"
