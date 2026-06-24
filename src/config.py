@@ -1,63 +1,227 @@
 """
-관심 종목, 지수, 환율, 뉴스 소스 설정.
-- 추가/제거하려면 이 파일만 수정하면 됩니다.
-- 한국 종목: 6자리 코드 (예: '005930' = 삼성전자)
-- 미국 종목: 티커 (예: 'AAPL')
-- 환율: FDR 심볼 (예: 'USD/KRW')
+Google Gemini API를 사용해 시장 인사이트를 생성합니다.
+
+시간대별 분기:
+- KST 시각에 따라 7개 구간으로 나눠 각기 다른 초점의 프롬프트 사용
+- 시황 텍스트 맨 앞에 시간대 라벨 포함 (예: "[07:23 장 시작 전 브리핑]")
+
+폴백 (2025-12 무료 티어 축소 반영):
+  1) gemini-2.5-flash-lite : RPD 1,000, RPM 15  (메인)
+  2) gemini-2.0-flash      : RPD 1,000, RPM 15  (구세대, 트래픽 적음)
+  3) gemini-2.0-flash-lite : RPD 1,000, RPM 30  (최후)
+- gemini-2.5-flash는 RPD 250으로 너무 빡빡해 폴백에서 제외
+- 모든 무료 티어 한도는 프로젝트 단위로 합산되므로 모델 다양화가 핵심
 """
 
-# 추적할 지수: {표시명: FinanceDataReader 심볼}
-INDICES_KR = {
-    "코스피": "KS11",
-    "코스닥": "KQ11",
-}
+import os
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-INDICES_US = {
-    "S&P500": "US500",
-    "나스닥": "IXIC",
-}
+from google import genai
+from google.genai import types
 
-# 환율: {표시명: FDR 심볼}
-# 표시명은 짧을수록 메시지 가독성 좋음
-EXCHANGE_RATES = {
-    "달러/원": "USD",
-    "파운드/원": "GBP",
-    "유로/원": "EUR",
-}
+from . import config
 
-# 관심 종목: {표시명: 심볼}
-# 자유롭게 추가/제거하세요.
-WATCHLIST_KR = {
-    "삼성전자": "005930",
-    "SK하이닉스": "000660",
-    "KODEX 200": "069500",
-    "KOSDAK 150": "229200",
-}
 
-WATCHLIST_US = {
-    "MICRON": "MU",
-    "NVIDIA": "NVDA",
-    "EVOLU": "EMAT",
-}
+KST = ZoneInfo("Asia/Seoul")
 
-# RSS 뉴스 소스 (한 곳이 실패해도 다른 곳에서 가져옴)
-NEWS_FEEDS = [
-    # 한국 경제 뉴스
-    ("한경", "https://www.hankyung.com/feed/economy"),
-    ("매경", "https://www.mk.co.kr/rss/30100041/"),
-    ("연합뉴스", "https://www.yna.co.kr/rss/economy.xml"),
-    # 미국 경제 뉴스
-    ("Yahoo Finance", "https://finance.yahoo.com/news/rssindex"),
+SYSTEM_INSTRUCTION = """당신은 한국과 미국 주식 시장을 매 시간 브리핑하는 애널리스트입니다.
+브리핑 시각과 시장 상태에 맞는 초점으로 작성하세요.
+간결하고 객관적이며 사실 기반으로 작성하세요.
+과장된 표현, 투자 권유, "반드시" "확실하다" 같은 단정적 표현은 피하세요.
+주어진 뉴스 헤드라인에 없는 사실은 절대 만들어내지 마세요."""
+
+# 폴백 순서: (모델명, 최대 시도 횟수)
+MODEL_FALLBACK = [
+    (config.GEMINI_MODEL, 3),        # gemini-2.5-flash-lite (메인)
+    ("gemini-2.0-flash", 2),         # 구세대, 한도 여유
+    ("gemini-2.0-flash-lite", 2),    # 최후
 ]
 
-# 뉴스 소스당 가져올 최대 헤드라인 수
-NEWS_PER_FEED = 5
+RETRY_DELAYS = [5, 15, 30]
+RETRYABLE_KEYWORDS = ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED")
 
-# 메시지 발송 시 사용할 링크 (카카오 메시지 버튼 URL)
-DEFAULT_LINK_URL = "https://finance.naver.com"
 
-# 사용할 Gemini 모델 — 무료 티어 한도 (2025-12 축소 이후)
-# - gemini-2.5-flash-lite: RPD 1,000, RPM 15 (권장: 매시 발송 안정)
-# - gemini-2.5-flash:      RPD   250, RPM 10 (16회/일 발송엔 빠듯)
-# - gemini-2.0-flash:      RPD 1,000, RPM 15 (구세대, 안정적)
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+def _get_session(hour: int) -> dict:
+    if 7 <= hour <= 8:
+        return {
+            "label": "장 시작 전 브리핑",
+            "focus_lines": [
+                "전일 미국 시장 마감 흐름과 핵심 뉴스 (2 문장)",
+                "오늘 한국 시장 개장 전망과 주목할 변수 (1-2 문장)",
+            ],
+            "tone": "차분하고 준비된 톤, 오늘 하루를 시작하기 전 정리하는 느낌",
+        }
+    if 9 <= hour <= 10:
+        return {
+            "label": "개장 직후 브리핑",
+            "focus_lines": [
+                "한국 시장 개장 직후 지수·환율 흐름 (1-2 문장)",
+                "오늘 주도하는 섹터나 종목, 주목 변수 (1-2 문장)",
+            ],
+            "tone": "역동적이고 즉각적인 톤, 변화 포착에 집중",
+        }
+    if 11 <= hour <= 12:
+        return {
+            "label": "오전장 정리",
+            "focus_lines": [
+                "오전 한국 시장의 핵심 흐름 정리 (2 문장)",
+                "점심 이후 오후장에서 주목할 포인트 (1-2 문장)",
+            ],
+            "tone": "분석적이고 정리하는 톤",
+        }
+    if 13 <= hour <= 14:
+        return {
+            "label": "오후장 브리핑",
+            "focus_lines": [
+                "오후 한국 시장의 진행 상황 (1-2 문장)",
+                "마감을 앞둔 변동 가능성과 주목 흐름 (1-2 문장)",
+            ],
+            "tone": "마감을 향해가는 긴장감 있는 톤",
+        }
+    if 15 <= hour <= 16:
+        return {
+            "label": "마감 브리핑",
+            "focus_lines": [
+                "오늘 한국 시장 마감 결과와 주요 흐름 (2 문장)",
+                "오늘밤 미국 시장에서 주목할 이벤트와 일정 (1-2 문장)",
+            ],
+            "tone": "하루를 정리하고 다음을 예고하는 톤",
+        }
+    if 17 <= hour <= 21:
+        return {
+            "label": "장 후 분석",
+            "focus_lines": [
+                "오늘 한국 시장의 핵심 흐름과 의미 (2 문장)",
+                "야간 미국 시장에서 주목할 변수와 한국에 미칠 영향 (1-2 문장)",
+            ],
+            "tone": "깊이 있는 분석 톤",
+        }
+    if hour == 22:
+        return {
+            "label": "미국 개장 직전 브리핑",
+            "focus_lines": [
+                "미국 시장 개장 직전 분위기와 주요 이슈 (2 문장)",
+                "미국 개장 후 한국 ADR/관련 종목 동향 전망 (1-2 문장)",
+            ],
+            "tone": "미국 시장 개시를 앞둔 기대감 있는 톤",
+        }
+    return {
+        "label": "일반 시황",
+        "focus_lines": [
+            "현재 한국·미국 시장의 핵심 흐름 (2 문장)",
+            "주목할 포인트와 변수 (1-2 문장)",
+        ],
+        "tone": "객관적인 톤",
+    }
+
+
+def _format_market_data(market_data: dict) -> str:
+    lines = ["[지수·환율]"]
+    for idx in market_data["indices"]:
+        lines.append(
+            f"- {idx['name']}: {idx['close']:.2f} ({idx['change_pct']:+.2f}%)"
+        )
+
+    lines.append("\n[관심 종목]")
+    for stock in market_data["stocks"]:
+        lines.append(
+            f"- {stock['name']}: {stock['close']:,.0f} ({stock['change_pct']:+.2f}%)"
+        )
+
+    return "\n".join(lines)
+
+
+def _build_prompt(market_data: dict, news_text: str, session: dict, now_kst: datetime) -> str:
+    data_summary = _format_market_data(market_data)
+    focus_text = "\n".join(
+        f"{i+1}. {line}" for i, line in enumerate(session["focus_lines"])
+    )
+
+    return f"""현재 시각: {now_kst.strftime('%Y-%m-%d %H:%M')} (KST)
+브리핑 종류: {session['label']}
+톤 가이드: {session['tone']}
+
+=== 시장 데이터 ===
+{data_summary}
+
+=== 뉴스 헤드라인 ===
+{news_text}
+
+위 정보를 바탕으로 다음 항목들을 한국어 한 단락으로 작성하세요:
+
+{focus_text}
+
+조건:
+- 전체 분량은 한국어 350자 내외 (반드시 380자 이내)
+- 마크다운, 불릿, 헤더, 번호 사용 금지
+- 자연스럽게 이어지는 평문 단락으로 작성
+- "투자 권유 아닙니다" 같은 면책 문구 넣지 말 것
+- 뉴스 헤드라인에 없는 사실은 만들어내지 말 것
+- 브리핑 종류와 톤 가이드에 맞춰 어조를 조정할 것"""
+
+
+def _call_gemini(client, model: str, prompt: str) -> str:
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_INSTRUCTION,
+            temperature=0.4,
+            max_output_tokens=1500,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ),
+    )
+    return (response.text or "").strip()
+
+
+def _is_retryable(error: Exception) -> bool:
+    msg = str(error)
+    return any(kw in msg for kw in RETRYABLE_KEYWORDS)
+
+
+def generate_insight(market_data: dict, news_text: str) -> str:
+    """
+    현재 시간대에 맞는 시황 인사이트를 생성합니다.
+
+    Returns:
+        시간대 라벨을 헤더로 포함한 인사이트 텍스트.
+    """
+    now_kst = datetime.now(KST)
+    session = _get_session(now_kst.hour)
+    header = f"[{now_kst.strftime('%H:%M')} {session['label']}]"
+
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    user_prompt = _build_prompt(market_data, news_text, session, now_kst)
+
+    last_error: Exception = RuntimeError("호출 시도 없음")
+
+    for model, max_attempts in MODEL_FALLBACK:
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = _call_gemini(client, model, user_prompt)
+                if result:
+                    if attempt > 1 or model != config.GEMINI_MODEL:
+                        print(f"[insight] {model} (시도 {attempt}) 성공")
+                    return f"{header}\n{result}"
+                raise RuntimeError("Gemini가 빈 응답을 반환")
+
+            except Exception as e:
+                last_error = e
+                error_msg = str(e)[:120]
+                retryable = _is_retryable(e)
+                is_last_attempt = attempt == max_attempts
+
+                if retryable and not is_last_attempt:
+                    delay = RETRY_DELAYS[min(attempt - 1, len(RETRY_DELAYS) - 1)]
+                    print(
+                        f"[insight] {model} 시도 {attempt} 실패 "
+                        f"({error_msg}) → {delay}초 후 재시도"
+                    )
+                    time.sleep(delay)
+                else:
+                    print(f"[insight] {model} 시도 {attempt} 실패 ({error_msg})")
+                    break
+
+    raise RuntimeError(f"Gemini API 모든 재시도 실패: {last_error}")
