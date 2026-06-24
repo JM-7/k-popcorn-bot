@@ -1,0 +1,31 @@
+name: Get Kakao Refresh Token (one-time)
+
+on:
+  workflow_dispatch:
+    inputs:
+      auth_code:
+        description: 'p8lAb_xr0-Zhi5KGUHFG6y1JcLQ-v5DxC9dUnU4CvR_hyeq05rD9zAAAAAQKFxKWAAABnvf8oNGUJG13ldIf8A'
+        required: true
+
+jobs:
+  get-token:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Exchange auth code for tokens
+        env:
+          REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
+          AUTH_CODE: ${{ github.event.inputs.auth_code }}
+        run: |
+          response=$(curl -s -X POST "https://kauth.kakao.com/oauth/token" \
+            -d "grant_type=authorization_code" \
+            -d "client_id=$REST_API_KEY" \
+            -d "redirect_uri=https://example.com/oauth" \
+            -d "code=$AUTH_CODE")
+          
+          echo "=================================================="
+          echo "응답 결과:"
+          echo "$response" | python3 -m json.tool
+          echo "=================================================="
+          echo ""
+          echo "위 결과에서 'refresh_token' 값을 복사해"
+          echo "GitHub Secrets의 KAKAO_REFRESH_TOKEN으로 등록하세요."
