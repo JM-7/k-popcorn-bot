@@ -56,5 +56,8 @@ NEWS_PER_FEED = 5
 # 메시지 발송 시 사용할 링크 (카카오 메시지 버튼 URL)
 DEFAULT_LINK_URL = "https://finance.naver.com"
 
-# 사용할 Gemini 모델
-GEMINI_MODEL = "gemini-2.5-flash"
+# 사용할 Gemini 모델 — 무료 티어 한도 (2025-12 축소 이후)
+# - gemini-2.5-flash-lite: RPD 1,000, RPM 15 (권장: 매시 발송 안정)
+# - gemini-2.5-flash:      RPD   250, RPM 10 (16회/일 발송엔 빠듯)
+# - gemini-2.0-flash:      RPD 1,000, RPM 15 (구세대, 안정적)
+GEMINI_MODEL = "gemini-2.5-flash-lite"
