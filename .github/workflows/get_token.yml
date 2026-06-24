@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       auth_code:
-        description: 'p8lAb_xr0-Zhi5KGUHFG6y1JcLQ-v5DxC9dUnU4CvR_hyeq05rD9zAAAAAQKFxKWAAABnvf8oNGUJG13ldIf8A'
+        description: 'OWtb4Hqkuht7rQrSkpLOn_iXKKMEKVF1Y3LMj1HDgcEH6jdXfoiccwAAAAQKDSKZAAABnvg64LRyxKx5jTsi9A'
         required: true
 
 jobs:
