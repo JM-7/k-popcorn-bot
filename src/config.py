@@ -1,8 +1,9 @@
 """
-관심 종목, 지수, 뉴스 소스 설정.
-- 종목 코드를 추가/제거하려면 이 파일만 수정하면 됩니다.
+관심 종목, 지수, 환율, 뉴스 소스 설정.
+- 추가/제거하려면 이 파일만 수정하면 됩니다.
 - 한국 종목: 6자리 코드 (예: '005930' = 삼성전자)
 - 미국 종목: 티커 (예: 'AAPL')
+- 환율: FDR 심볼 (예: 'USD/KRW')
 """
 
 # 추적할 지수: {표시명: FinanceDataReader 심볼}
@@ -17,19 +18,27 @@ INDICES_US = {
     "다우": "DJI",
 }
 
+# 환율: {표시명: FDR 심볼}
+# 표시명은 짧을수록 메시지 가독성 좋음
+EXCHANGE_RATES = {
+    "달러/원": "USD/KRW",
+    "파운드/원": "GBP/KRW",
+    "유로/원": "EUR/KRW",
+}
+
 # 관심 종목: {표시명: 심볼}
 # 자유롭게 추가/제거하세요.
 WATCHLIST_KR = {
     "삼성전자": "005930",
     "SK하이닉스": "000660",
-    "KODEX200": "069500",    
-    "KODEX KOSDAK 150": "229200",
+    "KODEX 200": "069500",
+    "KOSDAK 150": "229200",
 }
 
 WATCHLIST_US = {
-    "Apple": "AAPL",
+    "MICRON": "MU",
     "NVIDIA": "NVDA",
-    "Tesla": "TSLA",
+    "EVOLU": "EMAT",
 }
 
 # RSS 뉴스 소스 (한 곳이 실패해도 다른 곳에서 가져옴)
@@ -49,6 +58,4 @@ NEWS_PER_FEED = 5
 DEFAULT_LINK_URL = "https://finance.naver.com"
 
 # 사용할 Gemini 모델
-# - gemini-2.5-flash: 무료 티어에서 사용 가능, 매일 1회 호출 기준 무제한 수준
-# - gemini-2.5-flash-lite: 더 가볍고 빠름 (필요시 변경)
 GEMINI_MODEL = "gemini-2.5-flash"
