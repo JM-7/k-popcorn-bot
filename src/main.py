@@ -2,10 +2,10 @@
 파이프라인 진입점.
 
 흐름:
-  1. config의 지수·관심종목 데이터 수집 (FinanceDataReader)
-  2. RSS 피드에서 경제 뉴스 헤드라인 수집 (feedparser)
-  3. Gemini API로 시황 인사이트 생성 (뉴스 + 시장 데이터 입력)
-  4. 메시지 3개로 포맷팅
+  1. 시장 데이터 수집 — 지수 + 환율 + 관심종목 (FinanceDataReader)
+  2. RSS 뉴스 헤드라인 수집 (feedparser)
+  3. Gemini API로 시황 인사이트 생성
+  4. 메시지 포맷팅 (지수+환율 1개, 종목 1개, 시황 1~3개)
   5. 카카오톡 '나에게 보내기'로 발송
 
 실행:
@@ -25,12 +25,17 @@ from .kakao import KakaoClient
 
 def run(dry_run: bool = False) -> int:
     # 1. 시장 데이터 수집
+    # 지수 + 환율을 함께 처리 (등락률 표시 형식이 같아 한 메시지에 자연스럽게 들어감)
     print("[1/5] 시장 데이터 수집 중...")
-    all_indices = {**config.INDICES_KR, **config.INDICES_US}
+    all_indices = {
+        **config.INDICES_KR,
+        **config.INDICES_US,
+        **config.EXCHANGE_RATES,
+    }
     all_watchlist = {**config.WATCHLIST_KR, **config.WATCHLIST_US}
     market_data = stocks.collect_all(all_indices, all_watchlist)
     print(
-        f"      지수 {len(market_data['indices'])}개, "
+        f"      지표 {len(market_data['indices'])}개 (지수+환율), "
         f"종목 {len(market_data['stocks'])}개 수집"
     )
 
