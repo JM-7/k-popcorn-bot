@@ -1,4 +1,5 @@
 finance-datareader>=0.9.50
-openai>=1.50.0
+google-genai>=1.0.0
+feedparser>=6.0.10
 requests>=2.31.0
 pandas>=2.0.0
