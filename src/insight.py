@@ -58,7 +58,8 @@ def _call_gemini(client, model: str, prompt: str) -> str:
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_INSTRUCTION,
             temperature=0.4,
-            max_output_tokens=400,
+            max_output_tokens=800,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
         ),
     )
     return (response.text or "").strip()
