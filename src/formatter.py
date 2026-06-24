@@ -61,40 +61,11 @@ def format_stocks(stocks: list) -> str:
 
 def format_insight(insight_text: str) -> list:
     """
-    AI 시황 인사이트를 200자 이하 메시지들로 분할.
+    AI 시황 인사이트를 500자 이하 메시지들로 분할.
     문장 단위로 자르려 시도하고, 안 되면 글자 단위로 자릅니다.
     """
     header = "[AI 시황]\n"
-    max_per_msg = 200
-    first_msg_capacity = max_per_msg - len(header)
-
-    text = insight_text.strip()
-    if not text:
-        return [header + "(생성 실패)"]
-
-    messages = []
-    
-    # 첫 메시지: 헤더 포함
-    first_chunk = _split_chunk(text, first_msg_capacity)
-    messages.append(header + first_chunk)
-    text = text[len(first_chunk):].lstrip()
-
-    # 나머지: 헤더 없이 이어붙이기
-    while text:
-        chunk = _split_chunk(text, max_per_msg)
-        messages.append(chunk)
-        text = text[len(chunk):].lstrip()
-
-    return messages
-
-
-def format_insight(insight_text: str) -> list:
-    """
-    AI 시황 인사이트를 200자 이하 메시지들로 분할.
-    문장 단위로 자르려 시도하고, 안 되면 글자 단위로 자릅니다.
-    """
-    header = "[AI 시황]\n"
-    max_per_msg = 200
+    max_per_msg = 500
     first_msg_capacity = max_per_msg - len(header)
 
     text = insight_text.strip()
