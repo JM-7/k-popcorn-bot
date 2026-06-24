@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       auth_code:
-        description: 'OWtb4Hqkuht7rQrSkpLOn_iXKKMEKVF1Y3LMj1HDgcEH6jdXfoiccwAAAAQKDSKZAAABnvg64LRyxKx5jTsi9A'
+        description: '카카오 인증 코드 (?code= 다음 값)'
         required: true
 
 jobs:
