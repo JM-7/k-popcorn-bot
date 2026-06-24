@@ -108,7 +108,7 @@ def generate_insight(market_data: dict, news_text: str) -> str:
 - 자연스럽게 이어지는 평문 단락들로 작성
 - 단락 사이는 줄바꿈 1번
 - "투자 권유 아닙니다" 같은 면책 문구 넣지 말 것
-- 뉴스 헤드라인에 없는 사실은 만들어내지 말 것
+- 뉴스 헤드라인에 없는 사실은 만들어내지 말 것"""
 
     last_error: Exception = RuntimeError("호출 시도 없음")
 
