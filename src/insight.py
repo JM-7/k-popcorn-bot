@@ -1,15 +1,16 @@
 """
-Claude API를 사용해 시장 인사이트와 전일 뉴스 요약을 생성합니다.
-web_search 도구로 최신 정보를 검색해 반영합니다.
+OpenAI API를 사용해 시장 인사이트와 전일 뉴스 요약을 생성합니다.
+Responses API의 web_search 도구로 최신 정보를 검색해 반영합니다.
 """
 
 import os
-from anthropic import Anthropic
+
+from openai import OpenAI
 
 from . import config
 
 
-SYSTEM_PROMPT = """당신은 한국과 미국 주식 시장을 매일 아침 브리핑하는 애널리스트입니다.
+SYSTEM_INSTRUCTIONS = """당신은 한국과 미국 주식 시장을 매일 아침 브리핑하는 애널리스트입니다.
 간결하고 객관적이며 사실 기반으로 작성하세요.
 과장된 표현, 투자 권유, "반드시" "확실하다" 같은 단정적 표현은 피하세요."""
 
@@ -38,7 +39,7 @@ def generate_insight(market_data: dict) -> str:
     Returns:
         180자 이내의 한국어 인사이트 텍스트
     """
-    client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
     data_summary = _format_market_data(market_data)
 
@@ -57,26 +58,14 @@ def generate_insight(market_data: dict) -> str:
 - 마크다운, 불릿, 헤더 사용 금지
 - "투자 권유 아닙니다" 같은 면책 문구도 넣지 마세요 (별도로 처리됩니다)"""
 
-    response = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        tools=[
-            {
-                "type": "web_search_20250305",
-                "name": "web_search",
-                "max_uses": 3,
-            }
-        ],
-        messages=[{"role": "user", "content": user_prompt}],
+    response = client.responses.create(
+        model=config.OPENAI_MODEL,
+        instructions=SYSTEM_INSTRUCTIONS,
+        tools=[{"type": "web_search"}],
+        input=user_prompt,
     )
 
-    text_parts = []
-    for block in response.content:
-        if hasattr(block, "text") and block.text:
-            text_parts.append(block.text)
-
-    insight = " ".join(text_parts).strip()
+    insight = (response.output_text or "").strip()
 
     if not insight:
         insight = "오늘 시황 인사이트 생성에 실패했습니다. 데이터만 확인하세요."
