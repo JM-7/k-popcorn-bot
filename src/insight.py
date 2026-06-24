@@ -1,18 +1,26 @@
 """
-OpenAI API를 사용해 시장 인사이트와 전일 뉴스 요약을 생성합니다.
-Responses API의 web_search 도구로 최신 정보를 검색해 반영합니다.
+Google Gemini API를 사용해 시장 인사이트를 생성합니다.
+RSS에서 수집한 뉴스 헤드라인과 시장 데이터를 함께 LLM에 전달해,
+"전일 핵심 뉴스 + 오늘 시장 포인트"를 한 단락으로 요약합니다.
+
+무료 티어 사용 (gemini-2.5-flash):
+- 분당 10회, 일 1,500회 무료
+- 매일 1회 호출이면 무료 한도의 0.07% 사용
+- 카드 등록 불필요
 """
 
 import os
 
-from openai import OpenAI
+from google import genai
+from google.genai import types
 
 from . import config
 
 
-SYSTEM_INSTRUCTIONS = """당신은 한국과 미국 주식 시장을 매일 아침 브리핑하는 애널리스트입니다.
+SYSTEM_INSTRUCTION = """당신은 한국과 미국 주식 시장을 매일 아침 브리핑하는 애널리스트입니다.
 간결하고 객관적이며 사실 기반으로 작성하세요.
-과장된 표현, 투자 권유, "반드시" "확실하다" 같은 단정적 표현은 피하세요."""
+과장된 표현, 투자 권유, "반드시" "확실하다" 같은 단정적 표현은 피하세요.
+주어진 뉴스 헤드라인에 없는 사실은 절대 만들어내지 마세요."""
 
 
 def _format_market_data(market_data: dict) -> str:
@@ -32,40 +40,52 @@ def _format_market_data(market_data: dict) -> str:
     return "\n".join(lines)
 
 
-def generate_insight(market_data: dict) -> str:
+def generate_insight(market_data: dict, news_text: str) -> str:
     """
-    시장 데이터와 웹 검색을 바탕으로 한국어 시황 인사이트를 생성합니다.
+    시장 데이터 + RSS 뉴스를 바탕으로 한국어 시황 인사이트를 생성합니다.
+
+    Args:
+        market_data: stocks.collect_all()의 반환값
+        news_text:   news.format_news_for_prompt()의 반환값
 
     Returns:
         180자 이내의 한국어 인사이트 텍스트
     """
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
     data_summary = _format_market_data(market_data)
 
-    user_prompt = f"""다음은 오늘 아침 한국·미국 시장 데이터입니다.
+    user_prompt = f"""다음은 오늘 아침 시장 데이터와 전일 뉴스 헤드라인입니다.
 
+=== 시장 데이터 ===
 {data_summary}
 
-위 데이터와 web_search 결과를 바탕으로 다음을 작성하세요:
+=== 뉴스 헤드라인 ===
+{news_text}
 
-1. 전일 한국·미국 시장의 핵심 뉴스 1개 (한 문장)
-2. 오늘 시장에서 주목할 포인트 1개 (한 문장)
+위 정보를 바탕으로 다음을 한국어 한 단락으로 작성하세요:
+
+1. 전일 시장의 핵심 흐름을 보여주는 뉴스 1개 (헤드라인 중에서 선택, 한 문장)
+2. 오늘 시장에서 주목할 포인트 1개 (시장 데이터 흐름에서 도출, 한 문장)
 
 조건:
-- 전체 분량은 한국어 180자 이내
-- 두 문장을 한 단락으로 자연스럽게 이어 쓰세요
+- 전체 분량은 한국어 150자 이내
+- 두 문장을 자연스럽게 이어 한 단락으로
 - 마크다운, 불릿, 헤더 사용 금지
-- "투자 권유 아닙니다" 같은 면책 문구도 넣지 마세요 (별도로 처리됩니다)"""
+- "투자 권유 아닙니다" 같은 면책 문구 넣지 말 것
+- 뉴스 헤드라인에 없는 사실은 만들어내지 말 것"""
 
-    response = client.responses.create(
-        model=config.OPENAI_MODEL,
-        instructions=SYSTEM_INSTRUCTIONS,
-        tools=[{"type": "web_search"}],
-        input=user_prompt,
+    response = client.models.generate_content(
+        model=config.GEMINI_MODEL,
+        contents=user_prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_INSTRUCTION,
+            temperature=0.4,
+            max_output_tokens=400,
+        ),
     )
 
-    insight = (response.output_text or "").strip()
+    insight = (response.text or "").strip()
 
     if not insight:
         insight = "오늘 시황 인사이트 생성에 실패했습니다. 데이터만 확인하세요."
