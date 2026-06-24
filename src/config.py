@@ -15,7 +15,6 @@ INDICES_KR = {
 INDICES_US = {
     "S&P500": "US500",
     "나스닥": "IXIC",
-    "다우": "DJI",
 }
 
 # 환율: {표시명: FDR 심볼}
