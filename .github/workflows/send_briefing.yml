@@ -2,17 +2,27 @@ name: Send Hourly Stock Briefing
 
 on:
   schedule:
-    # 평일 KST 07:23 ~ 22:23 매시 발송 (총 16회/일, 분 단위 :23)
-    # GitHub Actions cron은 UTC만 지원하므로 두 줄로 분할.
+    # 매시 :13, :23, :33 세 번 트리거 (GitHub cron 스킵 대비)
+    # 중복 발송은 워크플로 안의 "Check recent runs" 단계에서 차단
     
-    # UTC 22:23, 23:23 (전날 일~목) = KST 07:23, 08:23 (당일 월~금)
-    - cron: '23 22,23 * * 0-4'
+    # UTC 22:13~33, 23:13~33 (전날 일~목) = KST 07:13~33, 08:13~33 (당일 월~금)
+    - cron: '13,23,33 22,23 * * 0-4'
     
-    # UTC 00:23 ~ 13:23 (당일 월~금) = KST 09:23 ~ 22:23 (당일 월~금)
-    - cron: '23 0-13 * * 1-5'
+    # UTC 00:13~33 ~ 13:13~33 (당일 월~금) = KST 09:13~33 ~ 22:13~33 (당일 월~금)
+    - cron: '13,23,33 0-13 * * 1-5'
 
   # 깃허브 UI에서 수동 실행도 가능
   workflow_dispatch:
+
+# 같은 워크플로의 동시 실행 방지 (이중 안전망)
+concurrency:
+  group: stock-briefing
+  cancel-in-progress: false
+
+# gh CLI가 같은 워크플로 실행 기록을 조회하려면 actions:read 권한 필요
+permissions:
+  actions: read
+  contents: read
 
 jobs:
   send-briefing:
@@ -23,18 +33,58 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 중복 발송 방지:
+      # 같은 워크플로의 최근 성공 실행이 5분 이내면 이 실행은 스킵
+      - name: Check for recent successful run
+        id: dedup
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CURRENT_RUN_ID="${{ github.run_id }}"
+          
+          # 자신을 제외한 최근 성공 실행의 시각 조회
+          RECENT_SUCCESS=$(gh run list \
+            --workflow=send_briefing.yml \
+            --status=success \
+            --limit=5 \
+            --json createdAt,databaseId \
+            --jq "[.[] | select(.databaseId != $CURRENT_RUN_ID)] | .[0].createdAt // empty")
+          
+          if [ -n "$RECENT_SUCCESS" ]; then
+            NOW_EPOCH=$(date +%s)
+            LAST_EPOCH=$(date -d "$RECENT_SUCCESS" +%s)
+            DIFF=$((NOW_EPOCH - LAST_EPOCH))
+            
+            echo "마지막 성공 실행: $RECENT_SUCCESS (${DIFF}초 전)"
+            
+            # 50분(3000초) 이내면 중복으로 판단 (한 시간에 1번만 발송)
+            if [ $DIFF -lt 3000 ]; then
+              echo "→ 50분 이내 발송 있음. 중복 방지로 스킵."
+              echo "skip=true" >> $GITHUB_OUTPUT
+            else
+              echo "→ 충분히 지났음. 정상 진행."
+              echo "skip=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "최근 성공 실행 없음. 정상 진행."
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Setup Python 3.11
+        if: steps.dedup.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
       - name: Install dependencies
+        if: steps.dedup.outputs.skip != 'true'
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Send stock briefing
+        if: steps.dedup.outputs.skip != 'true'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
