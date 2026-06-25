@@ -1,16 +1,5 @@
 name: Send Hourly Stock Briefing
 
-on:
-  schedule:
-    # 매시 :13, :23, :33 세 번 트리거 (GitHub cron 스킵 대비)
-    # 중복 발송은 워크플로 안의 "Check recent runs" 단계에서 차단
-    
-    # UTC 22:13~33, 23:13~33 (전날 일~목) = KST 07:13~33, 08:13~33 (당일 월~금)
-    - cron: '13,23,33 22,23 * * 0-4'
-    
-    # UTC 00:13~33 ~ 13:13~33 (당일 월~금) = KST 09:13~33 ~ 22:13~33 (당일 월~금)
-    - cron: '13,23,33 0-13 * * 1-5'
-
   # 깃허브 UI에서 수동 실행도 가능
   workflow_dispatch:
 
