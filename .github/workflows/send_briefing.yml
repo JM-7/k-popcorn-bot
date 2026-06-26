@@ -1,6 +1,4 @@
-name: Send Hourly Stock Briefing
-
-  # 깃허브 UI에서 수동 실행도 가능
+on:
   workflow_dispatch:
 
 # 같은 워크플로의 동시 실행 방지 (이중 안전망)
