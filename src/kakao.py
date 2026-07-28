@@ -44,6 +44,8 @@ class KakaoClient:
             },
             timeout=10,
         )
+        print(f"[KAKAO REFRESH] status_code={response.status_code}")
+        print(f"[KAKAO REFRESH] response_body={response.text}")
         response.raise_for_status()
         data = response.json()
 
