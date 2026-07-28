@@ -1,3 +1,6 @@
+#API 호출 예제
+https://kauth.kakao.com/oauth/authorize?client_id=229bd2a9377dc1fad7c3a4eb1d924720&redirect_uri=https://example.com/oauth&response_type=code&scope=talk_message
+
 # 카카오톡 주식 브리핑 봇
 
 매일 평일 아침 7:30 KST에 카카오톡 '나와의 채팅'으로 주식 시장 브리핑을 자동 발송합니다.
